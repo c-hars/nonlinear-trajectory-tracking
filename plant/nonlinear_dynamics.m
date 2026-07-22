@@ -121,8 +121,9 @@ function dxdt = nonlinear_dynamics(x, u, qp, opts)
         f_  = 0.5 * sinc1(ang/2)^2;
         if ang < 1e-2
             h_ = (1/6) - ang^2/120 + ang^4/5040;
+            % h_ = ((1/6) - (11/2250)*ang^2) / (1 + (1/42)*ang^2);
         else
-            h_ = (1 - sinc1(ang)) / ang^2;
+            h_ = (ang - sin(ang)) / ang^3;
         end
 
         C_Ib = eye(3) + g_*Sth + f_*(Sth*Sth);
