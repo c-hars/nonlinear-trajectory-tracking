@@ -82,7 +82,7 @@ thrust_fcn = @(t) ones(1,6);
 
 fprintf('\n--- SD-OPT (with %s attitude) ---\n', SDCAttRep)
 fprintf('  Compute : %.2f s total → %.1f Hz equivalent\n', sum(c1), length(U)/sum(c1))
-fprintf('    running the simulation (ode45) took up the other %.2f s\n', sum(c2))
+fprintf('    running the simulation (rk4 or ode45) took up the other %.2f s\n', sum(c2))
 print_tracking_metrics(X, r_, J, Jy, Ju, Jy_i)
 print_saturation(U_raw, qp)
 

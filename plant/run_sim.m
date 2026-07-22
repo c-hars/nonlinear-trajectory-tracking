@@ -7,9 +7,23 @@ function [T,X,U,compute_time_ctrl,compute_time_ode45,solve_info,U_raw,status] = 
         ctrl_fcn = @(t,x,k) qp.K * x
         opts.AttitudeRepresentation = 'euler'
         opts.MaxWallClock = inf     % [s] per-run compute budget
+        opts.Integrator = []        % 'ode45' or 'rk4'
     end
 
-    M  = 1;  % ode45 sub-samples per control interval (M >= 1)
+    if isempty(opts.Integrator)
+        if qp.Ts < 1/20
+            opts.Integrator = 'rk4';
+        else
+            opts.Integrator = 'ode45';
+        end
+    else
+        if qp.Ts < 1/20 && strcmpi(opts.Integrator,'rk4')
+            warning('Overriding rk4 request with ode45 (rk4 is inaccurate below 20Hz loop rate: current loop rate is %gHz)', 1/qp.Ts)
+            opts.Integrator = 'ode45';
+        end
+    end
+
+    M  = 1;  % number of sub-samples per control interval (M >= 1)
     dt = qp.Ts;
     N  = ceil(tspan(end) / dt);
     nx = numel(x0);
@@ -82,25 +96,37 @@ function [T,X,U,compute_time_ctrl,compute_time_ode45,solve_info,U_raw,status] = 
         u = max(u, -qp.nominal_omegas(:));  % floor at 0 RPM (positive thrust only)
         U(k,:) = u;
 
+        
         % Integrate from t to t+Ts, u held constant (ZOH)
-        qp.enabled = enabled_fcn(t);
-        ode = @(t, x) nonlinear_dynamics(x, u, qp, AttitudeRepresentation=opts.AttitudeRepresentation);
-
         clock_start = tic;
-        t_query = linspace(t, t+dt, M+1);
-        [~, x_local] = ode45(ode, t_query, x);
-        compute_time_ode45(k) = toc(clock_start);
+        qp.enabled = enabled_fcn(t);
+        dynamics = @(t,x) nonlinear_dynamics(x, u, qp, opts.AttitudeRepresentation);
+        switch opts.Integrator
+            case 'rk4'
+                x_sub = x;
+                dt_sub = dt / M;
+                for m = 1:M
+                    t_sub = t + (m-1)*dt_sub;
+                    x_sub = rk4_step(dynamics, t_sub, x_sub, dt_sub);
+                    idx = (k-1)*M + 1 + m;
+                    T(idx)   = t_sub + dt_sub;
+                    X(idx,:) = x_sub';
+                end
+                x = x_sub;
 
-        if M == 1
-            % 2-element tspan: ode45 returns internal steps; keep only endpoints
-            x_local = x_local([1 end],:);
+            case 'ode45'
+                t_query = linspace(t, t+dt, M+1);
+                [~, x_local] = ode45(dynamics, t_query, x);
+                if M == 1
+                    x_local = x_local([1 end],:);
+                end
+                idx = (k-1)*M + 2 : k*M + 1;
+                T(idx)   = t_query(2:end)';
+                X(idx,:) = x_local(2:end,:);
+                x = x_local(end,:)';
+
         end
-
-        idx = (k-1)*M + 2 : k*M + 1;
-        T(idx)   = t_query(2:end)';
-        X(idx,:) = x_local(2:end,:);
-
-        x = x_local(end,:)';
+        compute_time_ode45(k) = toc(clock_start);
 
     end
 
@@ -119,4 +145,12 @@ function [T_out,X_out,U_out,U_raw_out,compute_time_ctrl_out,compute_time_ode45_o
     compute_time_ode45_out = compute_time_ode45(1:k-1);
     solve_info_out         = solve_info(1:k-1);
     solve_info_out         = [solve_info_out{:}];
+end
+
+function x_next = rk4_step(f, t, x, dt)
+    k1 = f(t,        x);
+    k2 = f(t + dt/2, x + dt/2 * k1);
+    k3 = f(t + dt/2, x + dt/2 * k2);
+    k4 = f(t + dt,   x + dt   * k3);
+    x_next = x + (dt/6) * (k1 + 2*k2 + 2*k3 + k4);
 end
