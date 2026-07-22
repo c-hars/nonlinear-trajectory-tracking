@@ -10,6 +10,7 @@ function A = get_A_matrix_SDRE_FRAAttitude(x, qp)
     f_   = 0.5 * sinc1(ang/2)^2;
     if ang < 1e-2
         h_ = (1/6) - ang^2/120 + ang^4/5040;
+        % h_ = ((1/6) - (11/2250)*ang^2) / (1 + (1/42)*ang^2);
     else
         h_ = (ang - sin(ang)) / ang^3;
     end
