@@ -112,7 +112,6 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
     % --- 3. Compute the feedforward (reference preview) term ---
     
     clock_start = tic;
-    persistent Wex Wbk d_c N_c
     A_cl  = A - B*K_ss;
     CtQy  = C'*Qy;
 
@@ -126,47 +125,40 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
         approachingTerminal = (k+M >= length(r_));
 
         if ~(opts.AlwaysUseFullFiniteHorizonMPC || (opts.UseFullFiniteHorizonMPCAtTerminal && approachingTerminal))
-            % --- Weighted reference tables (cached here; an offline table on target).
-            %     Padded by M+d so no index clamping is needed in either branch.
-            
-            N = size(r_,2);
+
+            % Weighted reference, CtQy*r_
+            % Rebuilt each call for clarity. In implementations you'd probably want to precompute this as a fixed offline table - recomputing it each call is redundant computation
+            % Padded by M+d so no index clamping is needed
             d = max(1, round(opts.DecimationFactor));
-            if isempty(N_c) || N_c ~= N || d_c ~= d
-                rpad = [r_, repmat(r_(:,end), 1, M + d)];
-                Wex  = CtQy * rpad;                              % 12 x (N+M+d)
-                if d > 1
-                    Wbk = CtQy * movmean(rpad, [0 d-1], 2);      % block means
-                end
-                d_c = d;  N_c = N;
-            end
+            rpad = [r_, repmat(r_(:,end), 1, M + d)];
+            CtQyr_  = CtQy * rpad;
 
             F = A_cl';
 
             if d == 1
-                v_k1 = (eye(12) - F) \ Wex(:, k+M);
+                v_k1 = (eye(12) - F) \ CtQyr_(:, k+M);
                 for j = M-1:-1:1
-                    v_k1 = F*v_k1 + Wex(:, k+j);
+                    v_k1 = F*v_k1 + CtQyr_(:, k+j);
                 end
             else
-                Ninv = (eye(12) - F) \ eye(12);
 
-                Fd = eye(12);  Fb = F;  e = d;  % F^d, binary exponentiation
-                while e > 0
-                    if bitand(e,1), Fd = Fd*Fb; end
-                    Fb = Fb*Fb;  e = bitshift(e,-1);
-                end
-                Gd = (eye(12) - Fd) * Ninv;  % sum_{i<d} F^i
+                Ginf = (eye(12) - F) \ eye(12);
+                Fd = F^d;
+                Gd   = (eye(12) - Fd) * Ginf;  % sum_{i<d} F^i
 
                 nsteps = M - 1;
                 nblk   = floor(nsteps/d);
                 nexact = nsteps - nblk*d;
 
-                v_k1 = Ninv * Wex(:, k+M);
-                for b = nblk:-1:1                                % far field
-                    v_k1 = Fd*v_k1 + Gd*Wbk(:, k + nexact + (b-1)*d + 1);
+                v_k1 = (eye(12) - F) \ CtQyr_(:, k+M);
+                % far field
+                for b = nblk:-1:1
+                    jblk = nexact + (b-1)*d + 1;  % the first step in block b
+                    v_k1 = Fd*v_k1 + Gd*mean(CtQyr_(:, k+jblk : k+jblk+d-1), 2);
                 end
-                for j = nexact:-1:1                              % near field
-                    v_k1 = F*v_k1 + Wex(:, k+j);
+                % near field remnant
+                for j = nexact:-1:1
+                    v_k1 = F*v_k1 + CtQyr_(:, k+j);
                 end
             end
 
