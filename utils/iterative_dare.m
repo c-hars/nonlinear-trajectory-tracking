@@ -11,10 +11,10 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
         A, B, Q, R, P0;
         opts.Method = 'nk';
         opts.MinItersNK = 1;
-        opts.MaxItersNK = 10;  % w/ NK this can be quite low (convergence, typically within 2-4 iterations)
+        opts.MaxItersNK = 10;  % w/ NK this can be quite low (convergence, typically within 1-4 iterations)
         opts.EarlyBreakEnabled = true;
-        opts.Tolerance = 1e-4;  % DARE residual threshold. Machine precision ~= 1e-11. Can be generally be set quite a bit higher w/o perf loss. Note that - perhaps stating the obvious - tol will affect iterations/timing properties when early break is enabled. Less obviously, the tolerance in particular has a large effect on the timing variation.
-        opts.RiccatiConvergenceChecksEvery = 25  % iters. Set it at 1 if you want precise breaking - when the DARE tolerance is achieved, it will break the loop and return. Set it to 25 if you're doing timing comparisons between NK and Riccati: 1 dlyap call ~= 25 Riccati recursions, in terms of compute time, and the overhead of checking the DARE tolerance (relative to one Riccati recursion) is significant, inflating the Riccati timing -- not a fair comparison if you leave it at 1. One of the nice things about Riccati is you can get fine control over the DARE tolerance, mu_dare_tol ~= p95_dare_tol, since the number of iters is so large, while NK converges in only a 3-4 iters so you have way less options re when to break the loop, can't get as consistent/repetable tolerance (just guaranteed less than spec, not that median ~= p95 like you can with Riccati). But this is just one (fairly minor) thing mind you.
+        opts.Tolerance = 1e-4;  % DARE residual threshold. Machine precision ~= 1e-11. Can be generally be set quite a bit higher w/o perf loss
+        opts.RiccatiConvergenceChecksEvery = 25  % iters.
     end
 
     if opts.MinItersNK > opts.MaxItersNK
