@@ -124,14 +124,14 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
         M = round(opts.PreviewHorizon/qp.Ts);   % receding horizon preview window
         approachingTerminal = (k+M >= length(r_));
 
-        if ~(opts.AlwaysUseFullFiniteHorizonMPC || (opts.UseFullFiniteHorizonMPCAtTerminal && approachingTerminal))
+        % Weighted reference, CtQy*r_
+        % Rebuilt each call for clarity. In implementations you'd probably want to precompute this as a fixed offline table - recomputing it each call is redundant computation
+        % Padded by M+d so no index clamping is needed
+        d = max(1, round(opts.DecimationFactor));
+        rpad = [r_, repmat(r_(:,end), 1, M + d)];
+        CtQyr_  = CtQy * rpad;
 
-            % Weighted reference, CtQy*r_
-            % Rebuilt each call for clarity. In implementations you'd probably want to precompute this as a fixed offline table - recomputing it each call is redundant computation
-            % Padded by M+d so no index clamping is needed
-            d = max(1, round(opts.DecimationFactor));
-            rpad = [r_, repmat(r_(:,end), 1, M + d)];
-            CtQyr_  = CtQy * rpad;
+        if ~(opts.AlwaysUseFullFiniteHorizonMPC || (opts.UseFullFiniteHorizonMPCAtTerminal && approachingTerminal))
 
             F = A_cl';
 
@@ -172,12 +172,68 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
             P = C'*Qyf*C;
             M = min(M, length(r_) - k);
             v = C'*Qyf*r_(:, k+M);
-            for j = M-1:-1:1
-                K_j    = (R + B'*P*B) \ (B'*P*A);
-                A_cl_j = A - B*K_j;
-                P      = C'*Qy*C + K_j'*R*K_j + A_cl_j'*P*A_cl_j;
-                v      = A_cl_j'*v + C'*Qy*r_(:, k+j);
+
+            if d == 1
+
+                for j = M-1:-1:1
+                    K_j    = (R + B'*P*B) \ (B'*P*A);
+                    A_cl_j = A - B*K_j;
+                    P      = C'*Qy*C + K_j'*R*K_j + A_cl_j'*P*A_cl_j;
+                    v      = A_cl_j'*v + C'*Qy*r_(:, k+j);
+                end
+
+            else
+
+                % The below is not great, too analogous porting. Wouldve been fine if it worked but it doesnt anyays.
+                % Cleaner: just discretise at the decimated Ts lol, run the recursion there. That's the whole point of the decimation factor
+
+                max_dx = [[1 1 1]*10*0.01, ...      % | 10 | 5   | [cm]
+                          [1 1 1]*5*0.01, ...       % | 5  | 5   | [cm/s]
+                          deg2rad([1 1 1]*5), ...   % | 5  | 2.5 | [deg]
+                          deg2rad([1 1 1]*50)]';    % | 50 | 50  | [deg/s]
+                jstop = 1; % (*)
+                epsstop = 0.2; % (*) delta u threshold
+                checkEvery = 25; % (*) it's wasteful to check every iteration
+                checkPast = 300;  % (*) also wasteful to check too early
+                cnt = 0;
+                for j = M-1:-1:1
+                    K_j    = (R + B'*P*B) \ (B'*P*A);
+                    A_cl_j = A - B*K_j;
+                    P      = C'*Qy*C + K_j'*R*K_j + A_cl_j'*P*A_cl_j;
+                    v      = A_cl_j'*v + C'*Qy*r_(:, k+j);
+                    if cnt > checkPast && mod(cnt,checkEvery) == 0 % (*)
+                        if norm((K_j - K_prev)*max_dx,'fro') <= epsstop % (*)
+                            jstop = j; % Riccati has settled; rest is constant-F % (*)
+                            % fprintf("Settled after %d iters\n", M-1-j) % (*)
+                            disp((j-(M-1))*-1) % (*)
+                            break % (*)
+                        end % (*)
+                    end % (*)
+                    K_prev = K_j; % (*)
+                    cnt = cnt + 1; % (*)
+                end
+
+                nsteps = jstop - 1;  % (*)
+                if nsteps > 0  % (*)
+                    F    = (A - B*K_ss)';  % (*)
+                    % F = A_cl_j';
+                    Ginf = (eye(12) - F) \ eye(12);  % (*)
+                    Fd   = F^d;  % (*)
+                    Gd   = (eye(12) - Fd) * Ginf;       % sum_{i<d} F^i  % (*)
+
+                    nblk   = floor(nsteps/d);  % (*)
+                    nexact = nsteps - nblk*d;  % (*)
+
+                    for b = nblk:-1:1  % (*)
+                        jblk = nexact + (b-1)*d + 1;  % (*)
+                        v = Fd*v + Gd*mean(CtQyr_(:, k+jblk : k+jblk+d-1), 2);  % (*)
+                    end  % (*)
+                    for j = nexact:-1:1  % (*)
+                        v = F*v + CtQyr_(:, k+j);  % (*)
+                    end  % (*)
+                end  % (*)
             end
+            
             Kk  = (R + B'*P*B) \ (B'*P*A);
             Kvk = (R + B'*P*B) \ B';
             u   = -Kk*xk + Kvk*v;
