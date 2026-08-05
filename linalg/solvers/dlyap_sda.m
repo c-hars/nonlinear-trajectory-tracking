@@ -1,20 +1,32 @@
 function [X, info] = dlyap_sda(A, Q, tol)
+% ---
+% 
 % Solves the discrete-time Lyapunov equation:
 %   A*X*A' - X + Q = 0
 % 
 % Same calling convention as MATLAB-native dlyap(); drop-in replacement.
+% Also returns an info struct (notably info.IsStable: Schur stability verdict on A).
 % 
-% [X, info] = dlyap_sda(A, Q) additionally returns an info struct; the key piece is info.IsStable, a Schur stability verdict on A. Used in iterative_dare (NK iteration cannot begin from an unstable initial guess).
+% Fast, portable cold solver. Faster *suboptimal solves* (via reduced tol) are also possible.
+% Preconditions are unchecked by design (hot-loop solver).
+% Convergence requires a Schur-stable A (providing a stability test).
 % 
-% Uses Smith squaring / a structure-preserving doubling algorithm (SDA); readily portable to embedded, and also is iterative - allows solves down to machine precision, or to some prespecified tolerance (early break), or simply for some fixed budget of iterations.
+% ---
 % 
-% Unlike dlyap or dlyap_schur, a closed-loop stable A *is* required to solve the Lyapunov equation via this method. Failure to converge within the iteration limit yields an instability verdict for A.
+% Smith doubling evaluates the series:
+%       X = sum_{i=0}^{inf} A^i * Q * (A')^i
+% via the partial-sum doubling identity:
+%       S_{2N} = S_N + A^N * S_N * (A^N)'
+% where S_N = sum_{i=0}^{N-1} A^i * Q * (A')^i (i.e. the N-truncated sum).
+% Iterations thus yield S_1 -> S_2 -> S_4 -> S_8 -> ... (quadratic convergence).
 % 
-% Preconditions (compatible sizes, Q positive semi-definite, (A,Q^{1/2}) observable) are unchecked by design (this is a hot-loop solver).
+% In the implementation: X tracks S_N, P tracks A^N. Each iteration computes:
+%       dX = P*X*P', X <- X + dX, P <- P^2
+% yielding X = S_2, S_4, S_8, ... for j = 1, 2, 3, ... .
 % 
-% References:
-%   doi:10.1137/0116017 (introduction of the Smith doubling technique, originally applied to the continuous time Sylvester equation),
-%   doi:10.1002/gamm.202000018 (modern overview of SDA algorithms, including the dlyap (Stein equation) case).
+% ---
+% 
+% (doi:10.1137/0116017, doi:10.1002/gamm.202000018)
 
     cls = class(A);
     if nargin < 3 || isempty(tol)

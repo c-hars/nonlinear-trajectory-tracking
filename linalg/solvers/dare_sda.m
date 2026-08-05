@@ -1,19 +1,26 @@
 function [P, info] = dare_sda(A, B, Q, R, opts)
+% ---
+% 
 % Solves the discrete-time algebraic Riccati equation:
 %   P = A'PA - A'PB(R + B'PB)^{-1}B'PA + Q
 % 
 % Same calling convention as MATLAB-native dare(); drop-in replacement.
+% Also returns an info struct (SolveSuccess, TolAchieved, SolverIterations).
 % 
-% Fast, portable cold solver that can be implemented on embedded. Faster *suboptimal solves* (via reduced tol) are also possible. 
+% Fast, portable cold solver. Faster *suboptimal solves* (via reduced tol) are also possible.
+% Preconditions are unchecked by design (hot-loop solver).
+% 
+% ---
 % 
 % Uses the structure-preserving doubling algorithm (SDA):
 %       Wk      = I + G_k*H_k
 %       A_{k+1} = A_k*(Wk\A_k)
 %       G_{k+1} = G_k + A_k*(Wk\G_k)*A_k'
 %       H_{k+1} = H_k + A_k'*H_k*(Wk\A_k)
+% 
 % (doi:10.1080/00207170410001714988, doi:10.1002/gamm.202000018)
 %
-% Preconditions are unchecked by design (this is a hot-loop solver).
+% ---
 
     arguments
         A, B, Q, R;
