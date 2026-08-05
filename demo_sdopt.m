@@ -36,7 +36,7 @@ thrust_fcn = @(t) ones(1,6);
 [t, X, U, c1] = run_sim(qp, tspan, x0, thrust_fcn, ctrl_fcn, ...
     AttitudeRepresentation='Euler');
 
-[J, Jy, Ju, Jy_i] = compute_J_LQT_v3(t, X, U, Qy, Qyf, R, C, x_ref_fcn, qp.Ts, ...
+[J, Jy, Ju, Jy_i] = compute_J_LQT(t, X, U, Qy, Qyf, R, C, x_ref_fcn, qp.Ts, ...
     AttitudeRepresentation='Euler');
 
 fprintf('\n--- LQT ---\n')
@@ -77,7 +77,7 @@ thrust_fcn = @(t) ones(1,6);
 
 % Evaluate cost in Euler coordinates regardless of controller representation
 [~, ~, C_eul, Qy_eul, Qyf_eul] = get_weights(qp, 'Euler');
-[J, Jy, Ju, Jy_i] = compute_J_LQT_v3(t, X, U, Qy_eul, Qyf_eul, R, C_eul, ...
+[J, Jy, Ju, Jy_i] = compute_J_LQT(t, X, U, Qy_eul, Qyf_eul, R, C_eul, ...
     x_ref_fcn, qp.Ts, AttitudeRepresentation=SimDataRep);
 
 fprintf('\n--- SD-OPT (with %s attitude) ---\n', SDCAttRep)
@@ -119,7 +119,7 @@ if isfile(nlmpc_file)
     SimDataRep = 'Quaternion';
 
     [~, ~, C_eul, Qy_eul, Qyf_eul] = get_weights(qp, 'Euler');
-    [J, Jy, Ju, Jy_i] = compute_J_LQT_v3(nlmpc_data.t, nlmpc_data.X, nlmpc_data.U, ...
+    [J, Jy, Ju, Jy_i] = compute_J_LQT(nlmpc_data.t, nlmpc_data.X, nlmpc_data.U, ...
         Qy_eul, Qyf_eul, R, C_eul, x_ref_fcn, qp.Ts, ...
         AttitudeRepresentation=SimDataRep);
     fprintf('\n--- NLMPC (default Q/R matrices, FRA attitude, cold start, actuator constraints) ---\n')

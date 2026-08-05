@@ -1,4 +1,4 @@
-function [J,Jy,Ju,Ji] = compute_J_LQT_v3(t, x_, u_, Qy, Qyf, R, C, x_ref_fcn, Ts, opts)
+function [J,Jy,Ju,Ji] = compute_J_LQT(t, x_, u_, Qy, Qyf, R, C, x_ref_fcn, Ts, opts)
 % Evaluate LQT cost in a common metric across attitude representations.
 % Each state sample is converted to the Euler-equivalent 12-state layout
 % [p; v_c; euler; omega] before C is applied, so J is directly comparable
