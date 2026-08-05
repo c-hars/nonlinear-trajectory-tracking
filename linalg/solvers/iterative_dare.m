@@ -10,10 +10,11 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
     arguments
         A, B, Q, R, P0;
         opts.Method = 'nk';
+        opts.DlyapSolver = @dlyap_sda; % 'dlyap' (MATLAB native), 'dlyap_sda' (Smith Doubling Algorithm), 'dlyap_schur' (MATLAB's method - Schur decomposition, plus Bartels Stewart - but with the additional stability check integrated for free)
         opts.MinItersNK = 1;
-        opts.MaxItersNK = 10;  % w/ NK this can be quite low (convergence, typically within 1-4 iterations)
+        opts.MaxItersNK = 10;  % w/ NK this can be quite low - convergence is typically within 1-3 iterations
         opts.EarlyBreakEnabled = true;
-        opts.Tolerance = 1e-4;  % DARE residual threshold. Machine precision ~= 1e-11. Can be generally be set quite a bit higher w/o perf loss
+        opts.Tolerance = 1e-4;  % DARE residual threshold - early break when this is reached. Machine precision ~= 1e-11, but suboptimal solves are also valid - the threshold can be set quite high w/o any tangible degradation; this is about the limit
         opts.RiccatiConvergenceChecksEvery = 25  % iters.
     end
 
@@ -71,11 +72,37 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
         % Newton-Kleinman iterations solve:
         %   P_{k+1} = A_K' P_{k+1} A_K + Q + K'RK
         % via dlyap. Requires a stabilising P0. See https://arxiv.org/pdf/2503.01587.
+            n_sda_iters = 0;
             for i = 1:opts.MaxItersNK
                 K  = (R + B'*P*B) \ (B'*P*A);
                 AK = A - B*K;
-                P  = dlyap(AK', Q + K'*R*K);
-                P  = (P + P') / 2;
+
+                % Solve the dlyap equation
+                solver_name = func2str(opts.DlyapSolver);
+                switch solver_name
+                    case 'dlyap'
+                        % Solver doesn't return stability info, so check explicitly.
+                        % Only needed on the first iteration.
+                        % If initialised outside of stability basin: NK iteration cannot be used.
+                        if i == 1 && ~all(abs(eig(AK)) < 1)
+                            info.UnstableK0 = true;
+                            break;
+                        end
+                        P = opts.DlyapSolver(AK', Q + K'*R*K);
+                    case {'dlyap_sda','dlyap_schur'}
+                        % These two solvers handle that stability check without needing an eigenvalue computation (expensive).
+                        % Closed-loop stability of AK is returned via sinfo.IsStable
+                        [P, sinfo] = opts.DlyapSolver(AK', Q + K'*R*K);
+                        if strcmpi(solver_name, 'dlyap_sda'), n_sda_iters = n_sda_iters + sinfo.Doublings; end
+                        if i == 1 && ~sinfo.IsStable
+                            info.UnstableK0 = true;
+                            break;
+                        end
+                    otherwise
+                        error('iterative_dare: unsupported DlyapSolver "%s".', func2str(opts.DlyapSolver));
+                end
+
+                P  = (P + P') / 2; % small asymmetry can accumulate due to numerical rounding
 
                 if opts.EarlyBreakEnabled && (i >= opts.MinItersNK)
                     if compute_dare_residual(A,B,Q,R,P) < opts.Tolerance
@@ -89,8 +116,13 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
     end
 
     P_ss = P;
-    info.SolverIterations = i;
+    if strcmpi(opts.Method,'nk') && strcmpi(opts.DlyapSolver,'dlyap_sda')
+            info.SolverIterations = n_sda_iters;
+    else
+        info.SolverIterations = i;
+    end
     info.TolAchieved = compute_dare_residual(A,B,Q,R,P);
     info.SolveSuccess = (info.TolAchieved < opts.Tolerance);
+
 
 end
