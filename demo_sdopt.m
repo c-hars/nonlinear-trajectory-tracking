@@ -9,7 +9,7 @@ load_copter_params
 % Other parameters can also be changed - e.g. modify the trajectory at ("utils/load_fig_8.m") and cost matrices at ("plant/get_weights.m").
 
 qp.Ts = 1/800;         % sample rate. NB: qp stands for "quadcopter parameters" (the plant was originally a quadcopter:))
-maneuver_time = 4.5;  % time the maneuever needs to be completed in [seconds]
+maneuver_time = 5.0;  % time the maneuever needs to be completed in [seconds]
 
 % for SDOPT. Choose from: Euler, Quaternion, MRP, FRA.
 SDCAttRep = 'Euler';

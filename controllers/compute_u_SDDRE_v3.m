@@ -151,6 +151,13 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                 Fd = F^d;
                 Gd   = (eye(12) - Fd) * Ginf;   % sum_{i=0 to d-1} F^i
 
+                Fpow = eye(12);
+                Psi1 = zeros(12);
+                for m = 1:d-1
+                    Fpow = F * Fpow;       % F^m
+                    Psi1 = Psi1 + m * Fpow; % sum_{m=1}^{d-1} m * F^m
+                end
+
                 nsteps = M - 1;
                 nearFieldFineSteps = 1*d; % N blocks, always at full res
                 % nearFieldFineSteps = ceil(0.05/qp.Ts); % 0.05s, always at full res
@@ -162,7 +169,14 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                 % far field
                 for b = nblk:-1:1
                     jblk = nexact + (b-1)*d + 1;  % the first step in block b
+
+                    % Mean ZOH:
                     v_k1 = Fd*v_k1 + Gd*mean(CtQyr_(:, k+jblk : k+jblk+d-1), 2);
+
+                    % % FOH:
+                    % qj    = CtQyr_(:, k+jblk);
+                    % delta = (CtQyr_(:, k+jblk+d-1) - qj) / (d-1);
+                    % v_k1  = Fd*v_k1 + Gd*qj + Psi1*delta;
                 end
                 % near field remnant
                 for j = nexact:-1:1
@@ -223,7 +237,23 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                     K_b    = (Rd + Bd'*P*Bd) \ (Bd'*P*Ad);
                     A_cl_b = Ad - Bd*K_b;
                     P      = C'*Qyd*C + K_b'*Rd*K_b + A_cl_b'*P*A_cl_b;
-                    v      = A_cl_b'*v + d*mean(CtQyr_(:, k+jblk : k+jblk+d-1), 2);;
+
+                    % Mean ZOH:
+                    v = A_cl_b'*v + d*mean(CtQyr_(:, k+jblk : k+jblk+d-1), 2);
+
+                    % % FOH:
+                    % F_b = (A - B*K_b)';   % fine-step closed-loop transpose
+                    % Fpow   = eye(12);
+                    % Psi0_b = eye(12);
+                    % Psi1_b = zeros(12);
+                    % for m = 1:d-1
+                    %     Fpow   = F_b * Fpow;
+                    %     Psi0_b = Psi0_b + Fpow;
+                    %     Psi1_b = Psi1_b + m * Fpow;
+                    % end
+                    % qj    = CtQyr_(:, k+jblk);
+                    % delta = (CtQyr_(:, k+jblk+d-1) - qj) / (d-1);
+                    % v     = A_cl_b'*v + Psi0_b*qj + Psi1_b*delta;
                 end
                 % near field remnant
                 % same as other branch, done at the full Ts
