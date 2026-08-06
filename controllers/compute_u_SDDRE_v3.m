@@ -113,7 +113,18 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
     
     clock_start = tic;
     A_cl  = A - B*K_ss;
-    CtQy  = C'*Qy;
+
+    persistent CtQyr_
+    % Weighted reference, CtQy*r_
+    % This quantity is referenced throughout - for efficiency, prefer precomputing as a fixed offline table. Recomputing it each call is redundant computation.
+    % But if the reference plan changes, or you're feeding a constantly changing reference, not a known-apriori plan - then you can't get away with precomputing. A circular buffer sized to the preview window (and only updated with the one-step new additions) would be a good idea there.
+    % Padded by M+d so no index clamping is needed
+    if k == 1 || isempty(CtQyr_)
+        d = max(1, round(opts.DecimationFactor));
+        M = round(opts.PreviewHorizon / qp.Ts);
+        rpad = [r_, repmat(r_(:,end), 1, M + d)];
+        CtQyr_ = C' * Qy * rpad;
+    end
 
     if isinf(opts.PreviewHorizon)
         % Constant reference approximation
@@ -123,13 +134,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
     else
         M = round(opts.PreviewHorizon/qp.Ts);   % receding horizon preview window
         approachingTerminal = (k+M >= length(r_));
-
-        % Weighted reference, CtQy*r_
-        % Rebuilt each call for clarity. In implementations you'd probably want to precompute this as a fixed offline table - recomputing it each call is redundant computation
-        % Padded by M+d so no index clamping is needed
         d = max(1, round(opts.DecimationFactor));
-        rpad = [r_, repmat(r_(:,end), 1, M + d)];
-        CtQyr_  = CtQy * rpad;
 
         if ~(opts.AlwaysUseFullFiniteHorizonMPC || (opts.UseFullFiniteHorizonMPCAtTerminal && approachingTerminal))
 
@@ -147,8 +152,10 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                 Gd   = (eye(12) - Fd) * Ginf;   % sum_{i=0 to d-1} F^i
 
                 nsteps = M - 1;
-                nblk   = floor(nsteps/d);
-                nexact = nsteps - nblk*d;
+                nearFieldFineSteps = ceil(0.1/qp.Ts);
+                nfine  = min(nsteps, nearFieldFineSteps);
+                nblk   = floor((nsteps - nfine)/d);
+                nexact = nsteps - nblk*d;  % >= nfine by construction
 
                 v_k1 = (eye(12) - F) \ CtQyr_(:, k+M);
                 % far field
@@ -179,7 +186,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                     K_j    = (R + B'*P*B) \ (B'*P*A);
                     A_cl_j = A - B*K_j;
                     P      = C'*Qy*C + K_j'*R*K_j + A_cl_j'*P*A_cl_j;
-                    v      = A_cl_j'*v + C'*Qy*r_(:, k+j);
+                    v      = A_cl_j'*v + CtQyr_(:, k+j);
                 end
 
             else
@@ -216,15 +223,15 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                     K_b    = (Rd + Bd'*P*Bd) \ (Bd'*P*Ad);
                     A_cl_b = Ad - Bd*K_b;
                     P      = C'*Qyd*C + K_b'*Rd*K_b + A_cl_b'*P*A_cl_b;
-                    v      = A_cl_b'*v + C'*Qyd*mean(r_(:, k+jblk : k+jblk+d-1), 2);
+                    v      = A_cl_b'*v + d*mean(CtQyr_(:, k+jblk : k+jblk+d-1), 2);;
                 end
-                % sub-block remnant
-                % same as other branch, done in the near field at the full Ts
+                % near field remnant
+                % same as other branch, done at the full Ts
                 for j = nexact:-1:1
                     K_j    = (R + B'*P*B) \ (B'*P*A);
                     A_cl_j = A - B*K_j;
                     P      = C'*Qy*C + K_j'*R*K_j + A_cl_j'*P*A_cl_j;
-                    v      = A_cl_j'*v + C'*Qy*r_(:, k+j);
+                    v      = A_cl_j'*v + CtQyr_(:, k+j);
                 end
 
             end
