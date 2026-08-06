@@ -142,9 +142,9 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                 end
             else
 
-                Ginf = (eye(12) - F) \ eye(12);
+                Ginf = (eye(12) - F) \ eye(12); % sum_{i=0 to inf} F^i
                 Fd = F^d;
-                Gd   = (eye(12) - Fd) * Ginf;  % sum_{i<d} F^i
+                Gd   = (eye(12) - Fd) * Ginf;   % sum_{i=0 to d-1} F^i
 
                 nsteps = M - 1;
                 nblk   = floor(nsteps/d);
@@ -184,14 +184,28 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
 
             else
 
-                [Ad,Bd] = c2d_zoh_expm(Ac,Bc,qp.Ts * d); % Ad != "A discrete", it's "A decimated" (but yes, discrete time also)
+                % [Ad,Bd] = c2d_zoh_expm(Ac,Bc,qp.Ts * d);
+                %   NB: Ad != "A discrete", it's "A decimated" (but yes, discrete time also)
+                % Below uses a cheaper re-discretisation (using the already-computed matrix exponential).
+                % > Exact ZOH discretisation at d*Ts, built from the fine-step (A,B)  
+                % > Taking d fine steps with a constant input is the same as one coarse step
+                %   with Ad = A^d and Bd = (I + A + A^2 + ... + A^{d-1}) * B = Gd * B
+                Apow = eye(12);
+                Gd   = eye(12);
+                for i = 1:d-1
+                    Apow = A * Apow;
+                    Gd   = Gd + Apow;
+                end
+                Ad = A * Apow;
+                Bd = Gd * B;
+
                 Qyd = Qy*d;
                 Rd  = R*d;
 
                 nsteps = M-1;
-                nearFieldFineSteps = ceil(0.1/qp.Ts); % 0.1s, always at full res
                 % nearFieldFineSteps = d; % one block, always at full res
-                % nearFieldFineSteps = 5*d; % N blocks, always at full res
+                % nearFieldFineSteps = 2*d; % N blocks, always at full res
+                nearFieldFineSteps = ceil(0.1/qp.Ts); % 0.1s, always at full res
                 nfine  = min(nsteps, nearFieldFineSteps); % steps adjacent to k forced to full Ts
                 nblk   = floor((nsteps - nfine)/d);
                 nexact = nsteps - nblk*d;  % >= nfine by construction
