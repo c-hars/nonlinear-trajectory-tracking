@@ -152,7 +152,8 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                 Gd   = (eye(12) - Fd) * Ginf;   % sum_{i=0 to d-1} F^i
 
                 nsteps = M - 1;
-                nearFieldFineSteps = ceil(0.1/qp.Ts);
+                nearFieldFineSteps = 1*d; % N blocks, always at full res
+                % nearFieldFineSteps = ceil(0.05/qp.Ts); % 0.05s, always at full res
                 nfine  = min(nsteps, nearFieldFineSteps);
                 nblk   = floor((nsteps - nfine)/d);
                 nexact = nsteps - nblk*d;  % >= nfine by construction
@@ -210,9 +211,8 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                 Rd  = R*d;
 
                 nsteps = M-1;
-                % nearFieldFineSteps = d; % one block, always at full res
-                % nearFieldFineSteps = 2*d; % N blocks, always at full res
-                nearFieldFineSteps = ceil(0.1/qp.Ts); % 0.1s, always at full res
+                nearFieldFineSteps = 1*d; % N blocks, always at full res
+                % nearFieldFineSteps = ceil(0.05/qp.Ts); % 0.05s, always at full res
                 nfine  = min(nsteps, nearFieldFineSteps); % steps adjacent to k forced to full Ts
                 nblk   = floor((nsteps - nfine)/d);
                 nexact = nsteps - nblk*d;  % >= nfine by construction

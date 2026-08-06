@@ -8,7 +8,7 @@ load_copter_params
 % Main parameters to experiment with are here.
 % Other parameters can also be changed - e.g. modify the trajectory at ("utils/load_fig_8.m") and cost matrices at ("plant/get_weights.m").
 
-qp.Ts = 1/400;         % sample rate. NB: qp stands for "quadcopter parameters" (the plant was originally a quadcopter:))
+qp.Ts = 1/800;         % sample rate. NB: qp stands for "quadcopter parameters" (the plant was originally a quadcopter:))
 maneuver_time = 4.5;  % time the maneuever needs to be completed in [seconds]
 
 % for SDOPT. Choose from: Euler, Quaternion, MRP, FRA.
@@ -82,7 +82,7 @@ A_fcn = get_SDC_A_function(SDCAttRep);
 ctrl_fcn = @(t,x,k,u_prev) compute_u_SDOPT(t, xmap(x), k, u_prev, ...
     r_, C, Qy, R, Qyf, qp, ...
     PreviewHorizon = SDOPTPreviewHorizon, ...
-    DecimationFactor = max(1, round(0.01/qp.Ts)), ...
+    DecimationFactor = max(1, round(0.05/qp.Ts)), ...
     SDC_A_function = A_fcn, ...
     SDC_B_function = @(uk,qp) get_B_matrix_SDRE(uk,qp));
 
@@ -115,6 +115,27 @@ figure(2); clf
 do_plots(t, X, U, r_, qp, SimDataRep)
 sgtitle(sprintf('SD-OPT (with %s attitude)', SDCAttRep))
 
+%%
+
+t1 = [stats.TimeToComputeDiscreteSDCMatrices];
+t2 = t1 + [stats.TimeToSolveDARE];
+t3 = t2 + [stats.TimeToComputeFeedforward];
+
+% cla reset; hold on
+% plot(t1*1000)
+% plot(t2*1000)
+% plot(t3*1000)
+
+dt1 = t1*1000;
+dt2 = (t2-t1)*1000;
+dt3 = (t3-t2)*1000;
+
+subplot(3,1,2); cla reset
+area(t(1:end-1), [dt1(:) dt2(:) dt3(:)], 'EdgeColor', 'none')
+yline(qp.Ts * 1000, '--')
+ylim([-0.02 1]*qp.Ts*1.1 * 1000)
+ylabel("Compute [ms]")
+legend('sdc','dare','ff','Location','west')
 
 %% Alternative: 3D trajectory plot - show the reference path versus and what was actually tracked.
 
