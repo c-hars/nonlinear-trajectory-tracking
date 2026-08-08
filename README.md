@@ -54,7 +54,7 @@ The demo currently tests three controllers across the chosen trajectory:
 ### Requirements
 
 - MATLAB R2021a or newer (name–value function-call syntax)
-- Control System Toolbox (`idare`, `dlyap`)
+- Control System Toolbox (optional; the default `dare`/`dlyap` solvers are standalone)
 
 
 ## Motivation
@@ -136,7 +136,7 @@ SD-OPT's per-step cost, in contrast, is fixed linear algebra with deterministic 
 
 ### Numeric results.
 
-| | 4.5s | 4.75s | 5.0s | 6s | 8s | 10s | 20s | |
+| *Maneuver time* | 4.5s | 4.75s | 5.0s | 6s | 8s | 10s | 20s | |
 |---|---|---|---|---|---|---|---|---|
 | **Per-step compute [median]** | — | — | — | — | — | 4.0ms | 4.0ms | *Linear MPC* |
 | | 2.0s | 1.7s | 1.4s | 0.8s | 0.8s | 0.7s | 0.8s | *Nonlinear MPC* (‡) |
