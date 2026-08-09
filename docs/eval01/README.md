@@ -7,11 +7,11 @@ This controller requires solving the DARE at each timestep – done via warm-sta
 
 ## Warm-started DARE solves: TLDR version
 
-A SDRE controller solves a discrete algebraic Riccati equation (DARE) at every control step:
+A SDRE controller solves a discrete algebraic Riccati equation (DARE)
 
 $$ P = A^{\top} P A - A^{\top} P B (R + B^{\top} P B)^{-1} B^{\top} P A + Q, \qquad K = (R + B^{\top} P B)^{-1} B^{\top} P A $$
 
-and the SDC matrices $`(A,B)`$ change with state, so the feedback gain and cost-to-go matrices must be recomputed continuously.
+at every control step: the SDC matrices $`(A,B)`$ change with state, so the feedback gain and cost-to-go matrices must be recomputed continuously.
 
 This per-step DARE is solved by warm-started Newton–Kleinman iteration; because consecutive SDC models differ only slightly along a trajectory, warm started solves via NK iteration reproduce a from-scratch `idare` solution at a fraction of the cost. Relaxing the solve tolerance (DARE residual) to $10^{-4}$ — roughly seven orders of magnitude short of a completed solve — further shaves off the compute.
 
@@ -19,7 +19,7 @@ Performance is verified against the `idare` baseline across the full flight enve
 
 NK iteration has one critical weakness however: the warm start seed $K_0$ must yield a stable closed loop with the *next* step's $(A,B)$. Under practical circumstances, not a problem; under fixed-iteration schemes with aggressive trajectories and slow loop rates, this failure mode can't be ignored. A Schur-stability check, combined with a cold solve or Riccati fallback, is necessitated here.
 
-The cold solve fallback is retained in general – though if it's actually triggering, that indicates something amiss in the configuration and is worth addressing before deployment: try the default solver options first.
+The cold solve fallback is retained in general – though if it's actually triggering, that indicates something amiss in the configuration, worth addressing before deployment: try the default solver options first.
 
 
 **Section summaries:**
@@ -157,22 +157,22 @@ This target, $\mathrm{dare\_residual}$ $\leq 10^{-4}$, is thus generally used as
 In Figure 2, the actuator demand panel (bottom) is the regime map: demand crossing 100% indicates where the stressed regime begins. In the stressed regime, $t_{man} = 4.3–4.4$ s, actuators are saturating significantly (the maneuver becomes infeasible below 4.3 s) and here the warm-started DARE solver is stressed most.
 
 - In the benign regime, every solver variant – including NK with a single iteration – matches the cold `idare` cost exactly. The warm start is good enough that almost any amount of polishing suffices.
-- In the stressed regime, the under-budgeted NK variants (1–2 iterations) detonate (that is, the cost explodes, corresponding to the hexacopter losing closed-loop stability) – the pure-vertical spikes in the cost panel. This is the hard failure mode analysed later on. NK with 3 iterations and both 'adaptive' variants (early breaking once DARE residual is below threshold) complete every run at baseline cost.
-- Solve time is where the variants actually separate: NK adaptive sits around 0.3 ms/step against ~1.25 ms for cold `idare`, with the Riccati variants in between. For these variants, the cost panel says suboptimal DARE accuracy is largely free, with the under-budgeted solvers completing the maneuver practically just as well despite early termination (often indistinguishable $\Delta J$, and surviving the full operating envelope up to infeasibility).
+- In the stressed regime, the under-budgeted NK variants (1–2 iterations) detonate (that is, the cost explodes, corresponding to the hexacopter losing closed-loop stability) – the pure-vertical spikes in the cost panel. This is the hard failure mode analysed later on. NK with 3 iterations, along with its early-break variant, completes every run at baseline cost.
+- Solve time is where the variants actually separate: early-break NK sits around 0.3 ms/step against ~1.25 ms for cold `idare`, with the Riccati variants in between. For these variants, the cost panel says suboptimal DARE accuracy is largely free, with the under-budgeted solvers completing the maneuver practically just as well despite early termination (often indistinguishable $\Delta J$, and surviving the full operating envelope up to infeasibility).
 
 See below for the numerics (per solver, median compute time).
 
 | Solver | Benign: ms/step | Stressed: ms/step | Stressed outcome | Worst $\Delta J$ |
 |---|---|---|---|---|
-| `idare` (cold) | 1.28 | 1.25 | baseline | — |
-| Riccati, iters=25 | 0.24 | 0.25 | +13% ***cost penalty*** ($t_{man}$=4.3) | +13.0% |
-| Riccati, iters=50 | 0.41 | 0.42 | completes, $\Delta J$ <0.3% | +0.3% |
-| Riccati, iters=75 | 0.55 | 0.57 | completes | — |
-| Riccati, tol 1e-4 | 0.60 | 0.73 | completes | — |
-| NK, iters=1 | 0.20 | 0.19 | ***diverges*** | – (detonates) |
-| NK, iters=2 | 0.28 | 0.27 | diverges at 4.3 s; survives 4.4+ | – (detonates) |
-| NK, iters=3 | 0.35 | 0.39 | completes | — |
-| **NK, tol 1e-4** | **0.30** | **0.40** | **completes** | **—** |
+| `idare` (cold) | 1.23 | 1.27 | baseline | — |
+| Riccati, iters=25 | 0.22 | 0.23 | +13% ***cost penalty*** ($t_{man}$=4.3) | +13.1% |
+| Riccati, iters=50 | 0.38 | 0.38 | completes, $\Delta J$ <0.3% | +0.2% |
+| Riccati, iters=75 | 0.53 | 0.54 | completes | — |
+| Riccati, tol 1e-4 | 0.40 | 0.45 | completes | — |
+| NK, iters=1 | 0.17 | 0.18 | ***diverges*** | – (detonates) |
+| NK, iters=2 | 0.25 | 0.25 | diverges at 4.3 s; survives 4.4+ | – (detonates) |
+| NK, iters=3 | 0.34 | 0.34 | completes | — |
+| **NK, tol 1e-4** | **0.28** | **0.36** | **completes** | **—** |
 
 *Key: in the rightmost column, — indicates within margins (< 0.01%).*
 
