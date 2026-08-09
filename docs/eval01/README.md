@@ -2,7 +2,7 @@
 
 This controller requires solving the DARE at each timestep – done via warm-started Newton–Kleinman with early-termination. ~4× faster than a cold `idare` solve, with no practical tracking penalty. Verified across the full flight envelope.
 
-> ... and why the default parameters in `iterative_dare`? Want to understand or adjust them? Here's the doc you want.
+> If you're just using the defaults, that's the whole story. The rest of this document covers where those parameters came from and how much of it is tied to this particular system. It walks through the tuning basis, how solve accuracy trades against tracking cost, NK versus Riccati – enough to serve as a guide on how the parameters transfer beyond the default configuration.
 
 
 ## Warm-started DARE solves: TLDR version
@@ -13,9 +13,9 @@ $$ P = A^{\top} P A - A^{\top} P B (R + B^{\top} P B)^{-1} B^{\top} P A + Q, \qq
 
 at every control step: the SDC matrices $`(A,B)`$ change with state, so the feedback gain and cost-to-go matrices must be recomputed continuously.
 
-This per-step DARE is solved by warm-started Newton–Kleinman iteration; because consecutive SDC models differ only slightly along a trajectory, warm started solves via NK iteration reproduce a from-scratch `idare` solution at a fraction of the cost. Relaxing the solve tolerance (DARE residual) to $10^{-4}$ — roughly seven orders of magnitude short of a completed solve — further shaves off the compute.
+This per-step DARE is solved by warm-started Newton–Kleinman iteration; because consecutive SDC models differ only slightly along a trajectory, warm-started solves via NK iteration reproduce a from-scratch `idare` solution at a fraction of the cost. Relaxing the solve tolerance (DARE residual) to $10^{-4}$ — roughly seven orders of magnitude short of a completed solve — further shaves off the compute.
 
-Performance is verified against the `idare` baseline across the full flight envelope: NK iteration with $10^{-4}$ tolerance yields practically identical closed-loop tracking, at 75–80% lower compute.
+Performance is verified against the `idare` baseline across the full flight envelope: NK iteration with $10^{-4}$ tolerance yields practically identical closed-loop tracking, at 70–80% lower compute.
 
 NK iteration has one critical weakness however: the warm start seed $K_0$ must yield a stable closed loop with the *next* step's $(A,B)$. Under practical circumstances, not a problem; under fixed-iteration schemes with aggressive trajectories and slow loop rates, this failure mode can't be ignored. A Schur-stability check, combined with a cold solve or Riccati fallback, is necessitated here.
 
@@ -35,8 +35,8 @@ The cold solve fallback is retained in general – though if it's actually trigg
 |---|---|---|
 | Cold `dlqr()` | ~2.4 ms | flat |
 | Cold `idare` | ~1.3 ms | flat |
-| Warm Riccati iteration | ~0.7 ms | grows linearly (~5 ms at 200 Hz) |
-| **Warm Newton–Kleinman (default)** | **~0.3 ms** | **flat / drifts down** (~0.25 ms at 200 Hz) |
+| Warm Riccati iteration | ~0.4 ms | grows linearly (~4 ms at 200 Hz) |
+| **Warm Newton–Kleinman (default)** | **~0.3 ms** | **flat / drifts down** (~0.23 ms at 200 Hz) |
 
 **Design parameters:**
 
@@ -50,9 +50,9 @@ The cold solve fallback is retained in general – though if it's actually trigg
 
 <br>
 
-> **Note:** the threshold was tuned against the *Quaternion* SDC factorisation. Near hover, attitude-coordinate magnitudes differ across representations (Euler/FRA ≈ θ, qvec ≈ θ/2, MRP ≈ θ/4), and `get_weights` compensates via $Q_y$-scaling — but the Riccati solution $P$ inherits both scalings, so a fixed absolute residual tolerance is not equally tight across representations. Applying a similarity transform $T = \text{blkdiag}(I_6,\; s \cdot I_3,\; I_3)$ with $s \in \{1/2,\, 1,\, 2,\, 1/2\}$ for {Euler, Quaternion, MRP, FRA} normalises the attitude block to a common coordinate scale, making the single threshold equally meaningful everywhere.
+> **Note:** the threshold was tuned against the *Quaternion* SDC factorisation. Near hover, attitude-coordinate magnitudes differ across representations (Euler/FRA ≈ θ, qvec ≈ θ/2, MRP ≈ θ/4), and `get_weights` compensates via $Q_y$-scaling — but the Riccati solution $P$ inherits both scalings, so a fixed absolute residual tolerance is not equally tight across representations. Applying a similarity transform $`T = \text{blkdiag}(I_6;\; s \cdot I_3;\; I_3)`$ with $`s \in \lbrace 1/2, 1, 2, 1/2 \rbrace`$ for {Euler, Quaternion, MRP, FRA} normalises the attitude block to a common coordinate scale, making the single threshold equally meaningful everywhere.
 
-> **Note:** the threshold is specific to this system and cost matrices, since we're using the un-normalised DARE residual as the metric. The analysis may be repeated later using the normalised DARE residual computation; this yields more general results, independent of Q,R, and largely the closed-loop matrix too. The scope of this analysis is restricted to the unnormalised residuals however; residual monitoring with full normalisation is unnecessary here and adds extra compute on each Lyapunov iteration – quickly adds up, preferably avoided on a microcontroller.
+> **Note:** the threshold is specific to this system and cost matrices, since we're using the un-normalised DARE residual as the metric. Analysis of the normalised DARE residual computation yields more general results – independent of Q, R, and largely the closed-loop matrix too. However, the scope of this analysis is restricted to the unnormalised residuals; residual monitoring with full normalisation is unnecessary here and adds extra compute on each Lyapunov iteration – quickly adds up, preferably avoided on a microcontroller.
 
 > **Note:** the benchmarks herein used MATLAB's built-in `idare` and `dlyap`. The current codebase replaces these with `dare_sda` and `dlyap_sda` – faster, but absolute timings will differ.
 
@@ -79,7 +79,7 @@ It's a sharper answer than it first appears; NK and Riccati benefit from their w
 - Each warm method is tested with fixed iteration counts (deterministic timing) and with an early-break variant (iterate until the DARE residual passes a tolerance).
 - Residual throughout is the unnormalised form:
 
-$$ \||A_{cl}^{\top} P A_{cl} - P + Q + K^{\top} R K\||_F $$
+$$ \lVert A_{cl}^{\top} P A_{cl} - P + Q + K^{\top} R K \rVert_F $$
 
 where $A_{cl} = A - BK$ and $K = (R + B^{\top}PB)^{-1}B^{\top}PA$.
 
@@ -95,23 +95,24 @@ The question then is where to – justifiably – set the threshold. This sectio
 
 The graph below is the key result and was generated as follows:
 - We sweep $t_{maneuver}$ = $4.3–5.0$ s. This corresponds to the *stressed regime*.
-- For each $t_{maneuver}$, we complete a run with the controller in the loop, using either `nk` or `riccati` as the iterative solver. For each solver, we repeat this across several early break thresholds: $\mathrm{dare\_residual}$ below $10^p$, where $p\in[-10,-8,-6,-5,-4,-3,-2,-1]$.
+- For each $t_{maneuver}$, we complete a run with the controller in the loop, using either `nk` or `riccati` as the iterative solver. For each solver, we repeat this across several early break thresholds: $\mathrm{dare\_residual}$ below $10^p$, where $`p \in \{-10,-8,-6,-5,-4,-3,-2,-1 \}`$.
+- For each ($`t_{maneuver}`$, solver, $`\mathrm{dare\_residual}`$ threshold) combination, we compute the mean DARE residual achieved over the trajectory. The closed-loop cost $J$ is then compared against the cold `idare` baseline: the relative discrepancy is $`|\Delta J|/J_0`$.
 
 >Note that we run this test in the *stressed regime*, $t_{maneuver} = 4.3–5.0$ s, since here the accuracy of the DARE solution is most crucial. Throughout the stressed regime, full state feedback needs to counter the (significant, unmodelled) actuator saturation. Below 4.3s, the maneuver is infeasible – using any DARE solver – due to the effects of actuator saturation overwhelming the feedback controller's capacity. In general, the Riccati solution $P_{ss}$ needs to be accurate for the feedforward terms to be reliable, the feedback gain $K_{ss}$ is fully determined by $P_{ss}$, so the choice of DARE solver tolerance is best evaluated under the stressed regime, as the effects of inaccuracies are best highlighted here; in general, a more lenient threshold and more suboptimal DARE solution is acceptable, however for informed robust design, we deliberately evaluate over this regime (conservative results) to ensure reliability over the full operating envelope – up to infeasible tracking.
 
-Each point in the scatter plot below has (x,y) coordinates (mean_dare_residual_after_solve, measured_performance_impact).
+Each point in the scatter plot below therefore has (x,y) coordinates (mean_dare_residual_after_solve, measured_performance_impact).
 
 <p align="center">
   <img src="img/eval01_dare_residual_fx_log2_fig1_log.png">
 </p>
 
-*Figure 1a – DARE residual vs closed-loop cost discrepancy* $|\Delta J|/J$ *relative to the cold `idare` baseline.*
+*Figure 1 – DARE residual vs closed-loop cost discrepancy* $`|\Delta J|/J_0`$ *relative to the cold `idare` baseline.*
 
 From the figure we can see:
 
-- The relationship follows a power law over the full ten orders of magnitude: $|\Delta J|/J \approx c \cdot \mathrm{dare\_residual}^{\alpha}$ with $\alpha \approx 1\text{–}1.2$ (slightly superlinear).
+- The relationship follows a power law over the full ten orders of magnitude: $`|\Delta J|/J_0 \approx c \cdot \mathrm{dare\_residual}^{\alpha}`$ with $\alpha \approx 1\text{–}1.2$ (slightly superlinear).
 - NK and Riccati points fall on the same trend. Only the residual magnitude matters – not the method that produced it.
-- Below residuals of $\approx 10^{-4}$, the tracking performance is near-optimal – bounded within 0.1% of the true optimum. Above this residual level runs the risk of tracking degrading unacceptably. At residuals $\approx 10^{-1}$, J is ~1% worse on average across the stressed sweep, but *up to ~1000% higher* in the worst case – corresponding to the hexacopter *losing closed loop stability* and failing to complete the maneuver (the one outlier Riccati sample point, $`t_{man} = 4.4`$ s).
+- Below residuals of $\approx 10^{-4}$, the tracking performance is near-optimal – bounded within 0.1% of the true optimum. Operating above this residual level runs the risk of tracking degrading unacceptably. At residuals $\approx 10^{-1}$, J is ~1% worse on average across the stressed sweep, but *up to ~1000% higher* in the worst case – corresponding to the hexacopter *losing closed loop stability* and failing to complete the maneuver (the one outlier Riccati sample point, $`t_{man} = 4.4`$ s).
 
 Numerically: worst-case cost discrepancy vs cold `idare`, over the stressed sweep ($t_{man}$ = 4.3–5.0 s):
 
@@ -154,10 +155,10 @@ This target, $\mathrm{dare\_residual}$ $\leq 10^{-4}$, is thus generally used as
 
 *Figure 2 – Sweep over maneuver duration $`t_{man}`$ at $`T_s = 1/20`$, quaternion SDC. Top: closed-loop cost. Middle: DARE solve time per step. Bottom: actuator demand – above ~100%, saturation acts as an unmodelled disturbance and the feedback gain becomes load-bearing.*
 
-In Figure 2, the actuator demand panel (bottom) is the regime map: demand crossing 100% indicates where the stressed regime begins. In the stressed regime, $t_{man} = 4.3–4.4$ s, actuators are saturating significantly (the maneuver becomes infeasible below 4.3 s) and here the warm-started DARE solver is stressed most.
+In Figure 2, the actuator demand panel (bottom) illustrates the regime map: higher actuator demand corresponds to a more difficult maneuver, which in turn increases the stress on the DARE solver and the criticality of its solution accuracy. We consider the *benign regime* as $t_{man} \geq 5.0$, *stressed regime* as $t_{man} = 4.5–4.9$, *highly-stressed* regime as $t_{man} = 4.3–4.4$ s: in the latter case, actuators are saturating significantly (the maneuver becomes infeasible below 4.3 s). As regime stress increases, the warm start degrades and errors compound across timesteps; it is in these harder regimes that the solver variants separate:
 
-- In the benign regime, every solver variant – including NK with a single iteration – matches the cold `idare` cost exactly. The warm start is good enough that almost any amount of polishing suffices.
-- In the stressed regime, the under-budgeted NK variants (1–2 iterations) detonate (that is, the cost explodes, corresponding to the hexacopter losing closed-loop stability) – the pure-vertical spikes in the cost panel. This is the hard failure mode analysed later on. NK with 3 iterations, along with its early-break variant, completes every run at baseline cost.
+- In the benign regime, every solver variant – including NK with a single iteration – matches the cold `idare` cost almost exactly; the warm start is good enough that almost any amount of polishing suffices.
+- Across the stressed and highly-stressed regimes, the under-budgeted NK variants (1 and 2 iterations, respectively) detonate (that is, the cost explodes, corresponding to the hexacopter losing closed-loop stability) – the pure-vertical spikes in the cost panel. This is the hard failure mode analysed later on. NK with 3 iterations, along with its early-break variant, completes every run at baseline cost.
 - Solve time is where the variants actually separate: early-break NK sits around 0.3 ms/step against ~1.25 ms for cold `idare`, with the Riccati variants in between. For these variants, the cost panel says suboptimal DARE accuracy is largely free, with the under-budgeted solvers completing the maneuver practically just as well despite early termination (often indistinguishable $\Delta J$, and surviving the full operating envelope up to infeasibility).
 
 See below for the numerics (per solver, median compute time).
@@ -187,7 +188,7 @@ The failure-mode asymmetry visible in the table is worth noting — at roughly e
 
 ### NK's failure mode: leaving the stabilising basin
 
-NK's Lyapunov step is only meaningful if the current gain stabilises the current model. `dlyap` performs no stability check: if $\rho(A - BK) > 1$, it returns a matrix that is not a valid cost-to-go, the next gain is built from it, and the iteration compounds – the closed loop diverges within a few steps. Eigenvalue checks and fallbacks are easily accommodated for in code, but complicate timing guarantees, and Riccati's simplicity and robustness – global convergence from any PSD seed $P_0$ – has a major advantage in this regard: Riccati naturally suits the lower sample rate, aggressive maneuver situations, where the assumption on SDC matrices changing at a bounded rate between controller updates is at its weakest.
+NK's Lyapunov step is only meaningful if the current gain stabilises the current model. `dlyap` performs no stability check: if $\rho(A - BK) > 1$, it returns a matrix that is not a valid cost-to-go, the next gain is built from it, and the iteration compounds – the closed loop diverges within a few steps. Eigenvalue checks and fallbacks are easily accommodated for in code, but complicate timing guarantees, and Riccati's robustness – global convergence from any PSD seed $P_0$ – has a major advantage in this regard: Riccati naturally suits the lower sample rate, aggressive maneuver situations, where the assumption on SDC matrices changing at a bounded rate between controller updates is at its weakest.
 
 (Kleinman/Hewer): from a stabilising seed, every NK iterate is stabilising and convergence is monotone and *quadratic*. The compute advantages of NK over Riccati are clear from the table and the plot. But the basin is the set of stabilising gains, not all positive-semidefinite matrices, and its boundary is invisible until crossed. During aggressive maneuvers the SDC matrices change quickly between steps, the warm start goes stale, and one or two Newton steps are not enough to stay inside.
 
@@ -197,15 +198,15 @@ But NK never fails from inside its basin; a fixed budget of 3 iterations (empiri
 
 An explicit guard for the fixed-budget variant is cheap: check $\rho(A - BK) < 1$ before the `dlyap` (a 12x12 eigendecomposition, tens of microseconds – or integrated as part of the solve itself in a custom Lyapunov solver), and fall back to a cold `idare` on failure – the worst-case per-step cost stays predictably bounded, and a guaranteed fresh solution is provided to restart the warm solver. This is only necessitated for NK (Riccati may benefit also, but that's outside of this analysis's scope).
 
-The fallback itself admits two options: a cold `idare` solve, or a Riccati iteration from the warm-start $P_0$. A cold solve's compute profile is fully deterministic, but slowest; Riccati takes advantage of the warm start and sits somewhere in between NK and a cold solve, at the cost of variable timing. Note however that Riccati as a fallback is only viable at low loop rates (~50 Hz and below): its convergence rate, combined with closed-loop eigenvalues approaching the unit circle as $T_s \to 0$, make for a counterintuitive result; warm-started Riccati solves are *slower* than a cold solve via `idare` at 50 Hz and above (see Section 3). Thus at moderate-to-high rates, a cold solve is the only practical fallback.
+The fallback itself admits two options: a cold `idare` solve, or a Riccati iteration from the warm-start $P_0$. A cold solve's compute profile is fully deterministic, but slowest; Riccati takes advantage of the warm start and sits somewhere in between NK and a cold solve, at the cost of variable timing. Note however that Riccati as a fallback is only viable at low loop rates (below 50 Hz): its convergence rate, combined with closed-loop eigenvalues approaching the unit circle as $T_s \to 0$, make for a counterintuitive result; warm-started Riccati solves are *slower* than a cold solve via `idare` at 50 Hz and above (see Section 3). Thus at moderate-to-high rates, a cold solve is the only practical fallback.
 
-> The `idare` fallback route was disabled for the analysis herein, but it is included (with loud failure/warning when activated) in the code. A properly-configured iterative solver should not need this fallback – the default settings established hereafter are robust, and fallback is never activated even across the extreme regimes – however having this loud warning available during development, and cold solve fallback as a hard reliability guarantee in implementations, is worthwhile.
+> The `idare` fallback route was disabled for the analysis herein, but it is included in the code – with loud warnings when activated: useful during development, and a hard safety net in implementations. A properly-configured solver never triggers it.
 
 ## 3. Iterative solvers: scaling with sample rate
 
-### 3.1: Compute versus $T_s$. Riccati and NK, both early breaking with tol=1e-4.
+### 3.1: Iterations-to-tolerance versus $T_s$. Riccati and NK, both early breaking with tol=1e-4.
 
-The key result is that Riccati's compute cost **grows linearly** with sample rate; NK's  ***stays mostly flat*, and actually *drifts down*** as the sampling rate is increased.
+The key result is that Riccati's compute cost **grows linearly** with sample rate; NK's ***stays mostly flat*, and actually *drifts down*** as the sampling rate is increased.
 
 The figure below sweeps sample rate $T_s = 1/10$ to $1/200$ with the early-break tolerance fixed at $10^{-4}$, and reports iterations-to-tolerance two ways:
 
@@ -268,12 +269,12 @@ Figure 4 shows the full picture behind the iteration-count summary: cost, solve 
 
 `compute_u_SDDRE_v3` defaults to **warm-started Newton–Kleinman with early break at residual $10^{-4}$, minimum 1 and maximum 10 iterations**:
 
-- In practice the solver runs at ~0.30 ms/step, ~4× cheaper than cold `idare`, and the residual check doubles as a divergence guard.
+- In practice the solver runs at ~0.3 ms/step, ~4× cheaper than cold `idare`, and the residual check doubles as a divergence guard.
 - The tolerance comes directly from the Section 1 analysis: $10^{-4}$ bounds the cost penalty to 0.01–0.1%, below significance.
 - MinIters = 1 and MaxIters = 10 are generic defaults; early break handles termination, and the cap is a generous overbound – ensures reaching tolerance is the exit condition (not hitting an iteration limit). The minimum of 1 ensures the solution is at least partially updated at each control step, for solution freshness and more consistent timing. Both can be tailored per-regime using the analysis herein as a guide.
-- To mitigate the stability basin issue, NK is used with the early-breaking config. Alternatively – for fully consistent timing – set a sufficiently high iteration count: for example we showed how at 10Hz control, a minimum bound of 3 kept NK within its stability basin across all feasible maneuvers.
+- To mitigate the stability basin issue, NK is used with the early-breaking config. Alternatively – for fully consistent timing – set a sufficiently high iteration count: sections 2 and 3.3 showed how at both 10Hz and 20Hz control, a fixed iteration count of 3 kept NK within its stability basin across all feasible maneuvers.
 - Riccati iteration is retained but not recommended in general: its global convergence properties are strong, and advantageous in the edge cases, however it is never simultaneously as fast and as accurate as NK, and its cost per tolerance grows with sample rate – NK *favours* higher sample rates.
-- Cold `idare` remains the bootstrap (first step) *and* is retained as a fallback – with loud warnings – in case the iterative solver fails. The cold solve fallback guarantees recovery from an invalid seed – but if it's actually triggering, this indicates something amiss in the design and is worth addressing before deployment: a reasonably set up problem should never trigger the fallback.
+- Cold `idare` remains the bootstrap (first step), and is retained for any fallbacks – with loud warnings. The cold solve fallback provides recovery from an invalid seed – but if it's actually triggering, this indicates something amiss in the design and is worth addressing before deployment: a properly configured problem never triggers fallbacks.
 
 
 
