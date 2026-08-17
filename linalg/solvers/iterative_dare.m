@@ -14,7 +14,7 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
         opts.MinItersNK = 1;
         opts.MaxItersNK = 10;  % w/ NK this can be quite low - convergence is typically within 1-3 iterations
         opts.EarlyBreakEnabled = true;
-        opts.Tolerance = 1e-6;  % DARE residual threshold - early break when this is reached. Machine precision ~= 1e-11, but suboptimal solves are also valid - the threshold can be set quite high w/o any tangible degradation; this is about the limit
+        opts.Tolerance = 1e-4;  % DARE residual threshold - early break when this is reached. Machine precision ~= 1e-11, but suboptimal solves are also valid - the threshold can be set quite high w/o any tangible degradation; this is about the limit
         opts.RiccatiConvergenceChecksEvery = 25  % iters.
     end
 
@@ -73,8 +73,8 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
         %   P_{k+1} = A_K' P_{k+1} A_K + Q + K'RK
         % via dlyap. Requires a stabilising P0. See https://arxiv.org/pdf/2503.01587.
             n_sda_iters = 0;
+            K  = (R + B'*P*B) \ (B'*P*A); % gain of incoming P0
             for i = 1:opts.MaxItersNK
-                K  = (R + B'*P*B) \ (B'*P*A);
                 AK = A - B*K;
 
                 % Solve the dlyap equation
@@ -103,12 +103,19 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
                 end
 
                 P  = (P + P') / 2; % small asymmetry can accumulate due to numerical rounding
-
+                K_new = (R + B'*P*B) \ (B'*P*A);
                 if opts.EarlyBreakEnabled && (i >= opts.MinItersNK)
-                    if compute_dare_residual(A,B,Q,R,P) < opts.Tolerance
+                    % dK  = K_new - K;
+                    % res = norm(dK'*(R+B'*P*B)*dK) / norm(P);
+                    % if res < opts.Tolerance
+                    %     break
+                    % end
+                    if compute_dare_residual(A,B,Q,R,P,K_new) < opts.Tolerance
                         break
                     end
                 end
+                K = K_new;
+
             end
 
         otherwise
@@ -116,11 +123,11 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
     end
 
     P_ss = P;
-    if strcmpi(opts.Method,'nk') && strcmpi(func2str(opts.DlyapSolver),'dlyap_sda')
-            info.SolverIterations = n_sda_iters;
-    else
+    % if strcmpi(opts.Method,'nk') && strcmpi(func2str(opts.DlyapSolver),'dlyap_sda')
+    %     info.SolverIterations = n_sda_iters;
+    % else
         info.SolverIterations = i;
-    end
+    % end
     info.TolAchieved = compute_dare_residual(A,B,Q,R,P);
     info.SolveSuccess = (info.TolAchieved < opts.Tolerance);
 

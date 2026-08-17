@@ -31,7 +31,7 @@ function [X, info] = dlyap_sda(A, Q, tol)
     cls = class(A);
     if nargin < 3 || isempty(tol)
         if strcmp(cls, 'single')
-            tol = 1e-6;
+            tol = 5e-6;
         else
             tol = 1e-14;
         end

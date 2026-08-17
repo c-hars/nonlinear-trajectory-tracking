@@ -30,7 +30,7 @@ function [P, info] = dare_sda(A, B, Q, R, opts)
     end
 
     n  = size(A,1);
-    In = eye(n);
+    In = eye(n,'like',A);
 
     Ak = A;
     G  = B*(R\B');  G = (G + G')/2;

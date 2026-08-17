@@ -9,7 +9,7 @@ load_copter_params
 % Other parameters can also be changed - e.g. modify the trajectory at ("utils/load_fig_8.m") and cost matrices at ("plant/get_weights.m").
 
 qp.Ts = 1/100;  % sample rate. NB: qp stands for "quadcopter parameters" (the plant was originally a quadcopter).
-maneuver_time = 5.0;  % time the maneuever needs to be completed in [seconds]
+% maneuver_time = 5.0;  % time the maneuever needs to be completed in [seconds]
 
 SDCAttRep = 'Quaternion'; % for SDOPT. Choose from: Euler, Quaternion, MRP, FRA.
 SDOPTPreviewHorizon = 2.0; % [seconds]
@@ -20,6 +20,86 @@ UseSinglePrecision = true;  % run controller numerics in single precision (hardw
 % ^^^ Run before/after and compare using
 %   demo_sdopt; subplot(3,1,1); cla reset; plot([stats.DARESolverNumIters]); subplot(3,1,3); cla reset; plot([stats.DARESolverTolAchieved]); set(gca,'YScale','log'); ylim([10^-12 10^-4])
 
+
+%% Replay: run MATLAB controller on exported trajectory (for C++ comparison)
+
+cppDir = "..\..\hexacopter_cpp\data";
+
+SimDataRep = 'Quaternion';
+xmap = xq2sdc(SDCAttRep);
+
+[Q, R, C, Qy, Qyf, ~, sel] = get_weights(qp, SDCAttRep);
+A_fcn = get_SDC_A_function(SDCAttRep);
+
+if UseNumericalScaling
+    t_x = 1 ./ sqrt(diag(Q));
+    t_u = 1 ./ sqrt(diag(R));
+else
+    t_x = ones(12,1);
+    t_u = ones(6,1);
+end
+
+% Load exported trajectories
+fid = fopen(fullfile(cppDir, "x_traj.bin"), 'r');
+Xo = fread(fid, 'double'); fclose(fid);
+nr = numel(Xo) / 12;
+Xo = reshape(Xo, 12, nr).';
+
+fid = fopen(fullfile(cppDir, "u_traj.bin"), 'r');
+Uo = fread(fid, 'double'); fclose(fid);
+Uo = reshape(Uo, 6, nr).';
+
+fid = fopen(fullfile(cppDir, "r_traj.bin"), 'r');
+r_ = fread(fid, 'double'); fclose(fid);
+r_ = reshape(r_, numel(sel), []);
+
+% Reconstruct 13-state quaternion vector (reinsert q0)
+Xfull = zeros(nr, 13);
+for i = 1:nr
+    q_vec = Xo(i, 7:9);
+    q0 = sqrt(max(0, 1 - dot(q_vec, q_vec)));
+    Xfull(i,:) = [Xo(i,1:6), q0, q_vec, Xo(i,10:12)];
+end
+
+% Define controller
+ctrl_fcn = @(t,x,k,u_prev) compute_u_SDOPT(t, xmap(x), k, u_prev, ...
+    r_, C, Qy, R, Qyf, qp, ...
+    PreviewHorizon     = SDOPTPreviewHorizon, ...
+    SDC_A_function     = A_fcn, ...
+    SDC_B_function     = @(uk,qp) get_B_matrix_SDRE(uk,qp), ...
+    StateScaling       = t_x, ...
+    InputScaling       = t_u, ...
+    UseSinglePrecision = UseSinglePrecision);
+
+% Replay controller through exported states
+clear compute_u_SDDRE_v3 iterative_dare
+Ureplay = zeros(nr, 6);
+stats = cell(nr, 1);
+for k = 1:nr
+    [Ureplay(k,:), stats{k}] = ctrl_fcn(qp.Ts*(k-1), Xfull(k,:).', k, Uo(max(k-1,1),:).');
+end
+
+% Print (matching C++ log format)
+fprintf('\n--- MATLAB replay (%s, scaling=%d, single=%d) ---\n', ...
+    SDCAttRep, UseNumericalScaling, UseSinglePrecision)
+fprintf('   k,     sdc,    dare,      ff,   total, it,      res, ok  u\n')
+print_idx = [1:10, 20:20:nr];
+for i = 1:numel(print_idx)
+    k = print_idx(i);
+    s = stats{k};
+    t_sdc  = s.TimeToComputeDiscreteSDCMatrices * 1e6;
+    t_dare = s.TimeToSolveDARE * 1e6;
+    t_ff   = s.TimeToComputeFeedforward * 1e6;
+    fprintf('%4d, %7.0f, %7.0f, %7.0f, %7.0f, %2d, %12.2e, %2.0f  u = [%7.1f %7.1f %7.1f %7.1f %7.1f %7.1f]\n', ...
+        k, t_sdc, t_dare, t_ff, t_sdc+t_dare+t_ff, ...
+        s.DARESolverNumIters, s.DARESolverTolAchieved, s.DARESolverSuccess, ...
+        Ureplay(k,:))
+end
+
+
+%% -----------------------------------------
+
+return
 
 %% Linear control (Linear Quadratic Tracking)
 
