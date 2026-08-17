@@ -20,6 +20,10 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
 
         opts.DARESolver (1,:) char {mustBeMember(opts.DARESolver, {'nk','riccati','cold','idare','dlqr','sda'})} = 'nk'
         opts.DARESolverOpts (1,1) struct = struct()
+
+        opts.StateScaling (:,1) double = ones(12,1) % t_x: x_phys = diag(t_x)*x_scaled. Set to 1./sqrt(diag(Q)) for Bryson scaling.
+        opts.InputScaling (:,1) double = ones(6,1)  % t_u: u_phys = diag(t_u)*u_scaled. Set to 1./sqrt(diag(R)) for Bryson scaling.
+        opts.UseSinglePrecision (1,1) logical = false
     end
 
     % --- 1. Compute the (ZOH-discretised) SDC matrices ---
@@ -29,8 +33,41 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
     uk = max(uk, -qp.nominal_omegas(:));
     uk = min(uk,  qp.max_du(:));
     Bc = opts.SDC_B_function(uk, qp);
+    
+    % --- Precision cast (single-precision hardware prototype) ---
+    %   Cast before c2d so the Padé expm runs in single. Same Higham (2005)
+    %   algorithm and float degree ladder as the C++ expm_pade.
+    %   (MATLAB uses partial-pivot LU vs. no-pivot in C++; negligible difference.)
+    if opts.UseSinglePrecision
+        Ac = single(Ac); Bc = single(Bc);
+    end
     [A,B] = c2d_zoh_expm(Ac,Bc,qp.Ts);
+    if opts.UseSinglePrecision
+        A = single(A); B = single(B);
+        C = single(C); R = single(R);
+        Qy = single(Qy); Qyf = single(Qyf);
+        xk = single(xk);
+        r_ = single(r_);
+    end
     solve_info.TimeToComputeDiscreteSDCMatrices = toc(clock_start);
+
+    % --- Numerical scaling (diagonal similarity transform) ---
+    % Transforms the DARE into scaled coordinates.
+    % Everything from here through the feedforward computation works in scaled coordinates.
+    % u is un-scaled at the end before returning.
+    t_x = opts.StateScaling;
+    t_u = opts.InputScaling;
+    use_scaling = ~(all(t_x == 1) && all(t_u == 1));
+    if use_scaling
+        ix = 1 ./ t_x;
+        A  = ix .* A .* t_x';      % T_x^{-1} A T_x
+        B  = ix .* B .* t_u';      % T_x^{-1} B T_u
+        C  = C  .* t_x';           % C T_x
+        R  = t_u .* R .* t_u';     % T_u' R T_u
+        xk = ix .* xk;             % T_x^{-1} x_k
+        % Qy, Qyf stay in output space: no transform needed.
+        % r_ also stays in output space.
+    end
 
 
     % --- 2. Solve the DARE for P_ss, K_ss ---
@@ -120,7 +157,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
     A_cl  = A - B*K_ss;
     if isinf(opts.PreviewHorizon)
         % Constant reference approximation
-        s_k1  = (eye(12) - A_cl') \ (C'*Qy*r_(:,k));
+        s_k1  = (eye(12, 'like', A) - A_cl') \ (C'*Qy*r_(:,k));
         u = -K_ss*xk + (R + B'*P_ss*B) \ (B'*s_k1);
     else
         M = round(opts.PreviewHorizon/qp.Ts);  % receding horizon preview window
@@ -130,7 +167,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
             % Main branch: infinite horizon w/ finite preview
         
             % v_k1 = C'*Qy*r_(:, min(k+M,length(r_))); % normal costate seed
-            v_k1 = (eye(12) - A_cl') \ (C'*Qy*r_(:, min(k+M,length(r_))));
+            v_k1 = (eye(12, 'like', A) - A_cl') \ (C'*Qy*r_(:, min(k+M,length(r_))));
             for j = M-1:-1:1
                 v_k1 = A_cl'*v_k1 + C'*Qy*r_(:, min(k+j,length(r_)));
             end
@@ -153,6 +190,14 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
             Kvk = (R + B'*P*B) \ B';
             u   = -Kk*xk + Kvk*v;
         end
+    end
+    % --- Undo numerical scaling ---
+    if use_scaling
+        u = t_u .* u;
+    end
+    % --- Return u in double for the sim ---
+    if opts.UseSinglePrecision
+        u = double(u);
     end
     solve_info.TimeToComputeFeedforward = toc(clock_start);
 end

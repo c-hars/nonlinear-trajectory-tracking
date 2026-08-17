@@ -14,7 +14,7 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
         opts.MinItersNK = 1;
         opts.MaxItersNK = 10;  % w/ NK this can be quite low - convergence is typically within 1-3 iterations
         opts.EarlyBreakEnabled = true;
-        opts.Tolerance = 1e-4;  % DARE residual threshold - early break when this is reached. Machine precision ~= 1e-11, but suboptimal solves are also valid - the threshold can be set quite high w/o any tangible degradation; this is about the limit
+        opts.Tolerance = 1e-6;  % DARE residual threshold - early break when this is reached. Machine precision ~= 1e-11, but suboptimal solves are also valid - the threshold can be set quite high w/o any tangible degradation; this is about the limit
         opts.RiccatiConvergenceChecksEvery = 25  % iters.
     end
 
@@ -116,7 +116,7 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
     end
 
     P_ss = P;
-    if strcmpi(opts.Method,'nk') && strcmpi(opts.DlyapSolver,'dlyap_sda')
+    if strcmpi(opts.Method,'nk') && strcmpi(func2str(opts.DlyapSolver),'dlyap_sda')
             info.SolverIterations = n_sda_iters;
     else
         info.SolverIterations = i;
