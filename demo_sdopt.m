@@ -8,14 +8,14 @@ load_copter_params
 % Main parameters to experiment with are here.
 % Other parameters can also be changed - e.g. modify the trajectory at ("utils/load_fig_8.m") and cost matrices at ("plant/get_weights.m").
 
-qp.Ts = 1/1000;         % sample rate. NB: qp stands for "quadcopter parameters" (the plant was originally a quadcopter:))
-maneuver_time = 5.0;  % time the maneuever needs to be completed in [seconds]
+qp.Ts = 1/400;         % sample rate. NB: qp stands for "quadcopter parameters" (the plant was originally a quadcopter:))
+maneuver_time = 4.5;  % time the maneuever needs to be completed in [seconds]
 
 % for SDOPT. Choose from: Euler, Quaternion, MRP, FRA.
 SDCAttRep = 'Euler';
 SDCAttRep = 'MRP';
-SDCAttRep = 'Quaternion';
 SDCAttRep = 'FRA';
+SDCAttRep = 'Quaternion';
 SDOPTPreviewHorizon = 2.0; % [seconds]
 
 %% Linear control (Linear Quadratic Tracking)
@@ -36,14 +36,15 @@ SDOPTPreviewHorizon = 2.0; % [seconds]
 %     struct('ExitFlag', 1));
 % thrust_fcn = @(t) ones(1,6);
 
-% [t, X, U, c1] = run_sim(qp, tspan, x0, thrust_fcn, ctrl_fcn, ...
+% [t, X, U, c1, c2] = run_sim(qp, tspan, x0, thrust_fcn, ctrl_fcn, ...
 %     AttitudeRepresentation='Euler');
 
 % [J, Jy, Ju, Jy_i] = compute_J_LQT_v3(t, X, U, Qy, Qyf, R, C, x_ref_fcn, qp.Ts, ...
 %     AttitudeRepresentation='Euler');
 
 % fprintf('\n--- LQT ---\n')
-% fprintf('  Compute : %.2f s (precompute) + %.2f s (sim overhead)\n', lqt_precompute, sum(c1))
+% fprintf('  Compute : %.2f s total → %.1f Hz equivalent\n', lqt_precompute+sum(c1), length(U)/(lqt_precompute+sum(c1)))
+% fprintf('    running the simulation (rk4 or ode45) took up the other %.2f s\n', sum(c2))
 % print_tracking_metrics(X, r_, J, Jy, Ju, Jy_i)
 
 % figure(1); clf
@@ -85,11 +86,14 @@ A_fcn = get_SDC_A_function(SDCAttRep);
 %     DecimationFactor = max(1, round(0.05/qp.Ts)), ...
 %     SDC_A_function = A_fcn, ...
 %     SDC_B_function = @(uk,qp) get_B_matrix_SDRE(uk,qp));
+% df = 2.^(0:1:floor(log2((1/20)/qp.Ts))); % geometric progression
+df = 2.^(0:2:ceil(log2((1/20)/qp.Ts))); % geometric progression
+% df = [1];
 ctrl_fcn = @(t,x,k,u_prev) compute_u_SDOPT(t, xmap(x), k, u_prev, ...
     r_, C, Qy, R, Qyf, qp, ...
     PreviewHorizon = SDOPTPreviewHorizon, ...
-    DecimationFactor = [1 2 4 8 16], ...
-    StepsPerTier     = 16, ...
+    DecimationFactor = df, ...
+    StepsPerTier     = df(end), ...
     SDC_A_function = A_fcn, ...
     SDC_B_function = @(uk,qp) get_B_matrix_SDRE(uk,qp));
 
@@ -97,8 +101,7 @@ ctrl_fcn = @(t,x,k,u_prev) compute_u_SDOPT(t, xmap(x), k, u_prev, ...
 % Prefer actual geometric schemes for this reason. Tho only affects FullFH branch.
 
 thrust_fcn = @(t) ones(1,6);
-[t, X, U, c1, c2, stats, U_raw] = run_sim(qp, tspan, x0, thrust_fcn, ctrl_fcn, ...
-    AttitudeRepresentation=SimDataRep);
+[t, X, U, c1, c2, stats, U_raw] = run_sim(qp, tspan, x0, thrust_fcn, ctrl_fcn, AttitudeRepresentation=SimDataRep);
 
 % Evaluate cost in Euler coordinates regardless of controller representation
 [~, ~, C_eul, Qy_eul, Qyf_eul] = get_weights(qp, 'Euler');
@@ -163,6 +166,12 @@ legend('sdc','dare','ff','Location','west')
 % hold on; scatter3(xi(:,1), xi(:,2), xi(:,3), 4, parula(size(xi,1)), 'o')
 % xlabel('X'); ylabel('Y'); zlabel('Z')
 % view(125,40)
+
+%%
+
+% fid = fopen('qy_diag.bin', 'w');  fwrite(fid, diag(Qy), 'float64');  fclose(fid);
+% fid = fopen('qyf_diag.bin', 'w'); fwrite(fid, diag(Qyf), 'float64'); fclose(fid);
+% fid = fopen('r_scalar.bin', 'w'); fwrite(fid, R(1,1), 'float64');    fclose(fid);
 
 
 %% Compare with precomputed NLMPC (too slow to recompute live)

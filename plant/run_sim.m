@@ -74,20 +74,20 @@ function [T,X,U,compute_time_ctrl,compute_time_ode45,solve_info,U_raw,status] = 
         args = {t, x, k};
         if nargin(ctrl_fcn) == 4, args{end+1} = u_prev; end
 
-        try
+        % try
             [u, solve_info{k}] = ctrl_fcn(args{:});
-        catch err
-            warning(err.identifier, "Error in ctrl_fcn: %s", err.message)
-            status.diverged    = true;
-            status.k_abort     = k;
-            status.t_abort     = t;
-            status.message     = string(err.message);
-            status.identifier  = string(err.identifier);
-            n_keep = (k-1)*M + 1;
-            [T,X,U,U_raw,compute_time_ctrl,compute_time_ode45,solve_info] = ...
-                truncate_data(n_keep, k, T, X, U, U_raw, compute_time_ctrl, compute_time_ode45, solve_info);
-            return
-        end
+        % catch err
+            % warning(err.identifier, "Error in ctrl_fcn: %s", err.message)
+            % status.diverged    = true;
+            % status.k_abort     = k;
+            % status.t_abort     = t;
+            % status.message     = string(err.message);
+            % status.identifier  = string(err.identifier);
+            % n_keep = (k-1)*M + 1;
+            % [T,X,U,U_raw,compute_time_ctrl,compute_time_ode45,solve_info] = ...
+                % % truncate_data(n_keep, k, T, X, U, U_raw, compute_time_ctrl, compute_time_ode45, solve_info);
+            % return
+        % end
         compute_time_ctrl(k) = toc(clock_start);
 
         % Apply actuator limits

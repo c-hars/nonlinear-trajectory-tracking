@@ -316,7 +316,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
         end
 
         % One-time diagnostic: print the decimation schedule
-        if k == 1
+        if k == 1 && ~(nearfield_fine >= nsteps)
             tail_nblk = floor((M - 1 - nearfield_fine) / df(end));
             nblks = [repmat(nb, 1, ntiers-1), tail_nblk];
             fine  = nblks .* df;
