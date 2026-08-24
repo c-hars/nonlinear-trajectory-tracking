@@ -36,77 +36,12 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
 
     % --- 2. Solve the DARE for P_ss, K_ss ---
 
-    persistent P_ss K_ss
-
     clock_start = tic;
-
-    if k == 1, opts.DARESolver = 'cold'; end  % cold solve on init
-
-    switch lower(opts.DARESolver)
-
-    case {'cold','sda'}
-        sdaOpts = struct();
-        if isfield(opts.DARESolverOpts, 'Tolerance')
-            sdaOpts.Tolerance = opts.DARESolverOpts.Tolerance;
-        end
-        args = namedargs2cell(sdaOpts);
-        [P_ss, info] = dare_sda(A, B, C'*Qy*C, R, args{:});
-        K_ss = (R + B'*P_ss*B) \ (B'*P_ss*A);
-
-        solve_info.DARESolverTolAchieved = info.TolAchieved;
-        solve_info.DARESolverNumIters    = info.SolverIterations;
-        solve_info.DARESolverSuccess     = info.SolveSuccess;
-
-    case 'idare'
-
-        [P_ss,K_ss,~,info]  = idare(A, B, C'*Qy*C, R);
-        parse_idare_info(info);
-
-        solve_info.DARESolverTolAchieved = compute_dare_residual(A,B,C'*Qy*C,R,P_ss,K_ss);
-        solve_info.DARESolverNumIters    = 0;
-        solve_info.DARESolverSuccess     = 1;
-
-    case 'dlqr'
-
-        [K_ss,P_ss] = dlqr(A, B, C'*Qy*C, R);
-        solve_info.DARESolverTolAchieved = compute_dare_residual(A,B,C'*Qy*C,R,P_ss,K_ss);
-        solve_info.DARESolverNumIters    = 0;
-        solve_info.DARESolverSuccess     = 1;
-
-    case {'nk','riccati'} % the two iterative methods
-
-        solverOpts = opts.DARESolverOpts;
-        solverOpts.Method = opts.DARESolver;
-        args = namedargs2cell(solverOpts);
-        [P_ss, info] = iterative_dare(A, B, C'*Qy*C, R, P_ss, args{:});
-        K_ss  = (R + B'*P_ss*B) \ (B'*P_ss*A);
-
-        % Fallback to SDA if initialised outside the stability basin (only needed for NK)
-        solve_info.DARESolverSuccess = info.SolveSuccess;
-        if strcmpi(opts.DARESolver,'nk') && ~info.SolveSuccess
-            if isfield(info,'UnstableK0') && info.UnstableK0
-
-                sdaOpts = struct();
-                if isfield(opts.DARESolverOpts, 'Tolerance'), sdaOpts.Tolerance = opts.DARESolverOpts.Tolerance; end
-                args = namedargs2cell(sdaOpts);
-                [P_ss, info] = dare_sda(A, B, C'*Qy*C, R, args{:});
-                K_ss = (R + B'*P_ss*B) \ (B'*P_ss*A);
-                
-                solve_info.DARESolverSuccess = 0.5*info.SolveSuccess; % 0.5 == sentinel value for partial success
-
-                warning("compute_u_SDDRE_v3: NK iteration initialised outside of stability basin at k=%d. Fell back to SDA cold solve: success flag was %.1f", k, solve_info.DARESolverSuccess)
-                
-            end
-        end
-
-        solve_info.DARESolverTolAchieved = info.TolAchieved;
-        solve_info.DARESolverNumIters    = info.SolverIterations;
-
-    otherwise
-
-        error("Unknown DARESolver type.");
-
-    end
+    Q = C'*Qy*C;
+    [P_ss, K_ss, dare_info] = solve_dare(A, B, Q, R, k, opts.DARESolver, opts.DARESolverOpts);
+    solve_info.DARESolverTolAchieved = dare_info.TolAchieved;
+    solve_info.DARESolverNumIters    = dare_info.NumIters;
+    solve_info.DARESolverSuccess     = dare_info.Success;
     solve_info.TimeToSolveDARE = toc(clock_start);
     
 
@@ -116,7 +51,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
     A_cl  = A - B*K_ss;
 
     persistent CtQyr_
-    % Weighted reference, CtQy*r_
+    % Weighted reference, C'*Qy*r_
     % This quantity is referenced throughout - for efficiency, prefer precomputing as a fixed offline table. Recomputing it each call is redundant computation.
     % But if the reference plan changes, or you're feeding a constantly changing reference, not a known-apriori plan - then you can't get away with precomputing. A circular buffer sized to the preview window (and only updated with the one-step new additions) would be a good idea there.
     % Padded by M+d_max so no index clamping is needed
@@ -334,11 +269,98 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
 end
 
 
+function [P_ss, K_ss, info] = solve_dare(A, B, Q, R, k, solver, solverOpts)
+% Solve the DARE for the steady-state Riccati solution P_ss and gain K_ss.
+%
+% Persistent state: warm-starts iterative solvers across calls.
+% Cold-solves on k == 1 regardless of the requested solver.
+
+    persistent P_ss_ K_ss_
+    persistent warnedPreviously % for loud fallback warnings
+    if k == 1, warnedPreviously = false; end
+
+    if k == 1, solver = 'cold'; end
+
+    switch lower(solver)
+
+    case {'cold','sda'}
+        sdaOpts = struct();
+        if isfield(solverOpts, 'Tolerance')
+            sdaOpts.Tolerance = solverOpts.Tolerance;
+        end
+        args = namedargs2cell(sdaOpts);
+        [P_ss_, sinfo] = dare_sda(A, B, Q, R, args{:});
+        K_ss_ = (R + B'*P_ss_*B) \ (B'*P_ss_*A);
+
+        info.TolAchieved = sinfo.TolAchieved;
+        info.NumIters    = sinfo.SolverIterations;
+        info.Success     = sinfo.SolveSuccess;
+
+    case 'idare'
+
+        [P_ss_,K_ss_,~,sinfo] = idare(A, B, Q, R);
+        parse_idare_info(sinfo);
+
+        info.TolAchieved = compute_dare_residual(A, B, Q, R, P_ss_, K_ss_);
+        info.NumIters    = 0;
+        info.Success     = 1;
+
+    case 'dlqr'
+
+        [K_ss_,P_ss_] = dlqr(A, B, Q, R);
+        info.TolAchieved = compute_dare_residual(A, B, Q, R, P_ss_, K_ss_);
+        info.NumIters    = 0;
+        info.Success     = 1;
+
+    case {'nk','riccati'} % the two iterative methods
+
+        iterOpts = solverOpts;
+        iterOpts.Method = solver;
+        args = namedargs2cell(iterOpts);
+        [P_ss_, sinfo] = iterative_dare(A, B, Q, R, P_ss_, args{:});
+        K_ss_ = (R + B'*P_ss_*B) \ (B'*P_ss_*A);
+
+        % Fallback to SDA if initialised outside the stability basin
+        % - only needed for NK
+        info.Success = sinfo.SolveSuccess;
+        if strcmpi(solver,'nk') && ~sinfo.SolveSuccess
+            if isfield(sinfo,'UnstableK0') && sinfo.UnstableK0
+
+                sdaOpts = struct();
+                if isfield(solverOpts, 'Tolerance'), sdaOpts.Tolerance = solverOpts.Tolerance; end
+                args = namedargs2cell(sdaOpts);
+                [P_ss_, sinfo] = dare_sda(A, B, Q, R, args{:});
+                K_ss_ = (R + B'*P_ss_*B) \ (B'*P_ss_*A);
+                
+                info.Success = 0.5*sinfo.SolveSuccess; % 0.5 == sentinel value for partial success
+                
+                if warnedPreviously == false
+                    warning("solve_dare: NK iteration initialised outside of stability basin at k=%d. Fell back to SDA cold solve: success flag was %.1f", k, info.Success)
+                    warnedPreviously = true;
+                end
+                
+            end
+        end
+
+        info.TolAchieved = sinfo.TolAchieved;
+        info.NumIters    = sinfo.SolverIterations;
+
+    otherwise
+
+        error("Unknown DARESolver type: '%s'", solver);
+
+    end
+
+    P_ss = P_ss_;
+    K_ss = K_ss_;
+
+end
+
 function parse_idare_info(info)
     switch info.Report
-        case 1, warning("idare(), info.Report == 1 (The solution accuracy is poor)")
-        case 2, warning("idare(), info.Report == 2 (The solution is not finite)")
-        case 3, error("idare(), info.Report == 3 (No solution found since the Symplectic spectrum, denoted by [L;1./L], has eigenvalues on the unit circle)")
-        case 4, error("idare(), info.Report == 4 (Pencil is singular ([B;S;R] is rank deficient)")
+    case 1, warning("idare(), info.Report == 1 (The solution accuracy is poor)")
+    case 2, warning("idare(), info.Report == 2 (The solution is not finite)")
+    case 3, error("idare(), info.Report == 3 (No solution found since the Symplectic spectrum, denoted by [L;1./L], has eigenvalues on the unit circle)")
+    case 4, error("idare(), info.Report == 4 (Pencil is singular ([B;S;R] is rank deficient)")
     end
 end
