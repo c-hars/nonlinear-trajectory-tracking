@@ -50,18 +50,6 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
     clock_start = tic;
     A_cl  = A - B*K_ss;
 
-    persistent CtQyr_
-    % Weighted reference, C'*Qy*r_
-    % This quantity is referenced throughout - for efficiency, prefer precomputing as a fixed offline table. Recomputing it each call is redundant computation.
-    % But if the reference plan changes, or you're feeding a constantly changing reference, not a known-apriori plan - then you can't get away with precomputing. A circular buffer sized to the preview window (and only updated with the one-step new additions) would be a good idea there.
-    % Padded by M+d_max so no index clamping is needed
-    if k == 1 || isempty(CtQyr_)
-        d_max = max(opts.DecimationFactor);
-        M = round(opts.PreviewHorizon / qp.Ts);
-        rpad = [r_, repmat(r_(:,end), 1, M + d_max)];
-        CtQyr_ = C' * Qy * rpad;
-    end
-
     if isinf(opts.PreviewHorizon)
         % Constant reference approximation
         s_k1  = (eye(12) - A_cl') \ (C'*Qy*r_(:,k));
@@ -92,9 +80,9 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                 if k == 1
                     warning('compute_u_SDDRE_v3: nearfield tiers (%d fine steps) exceed horizon (%d). Falling back to full-rate.', nearfield_fine, nsteps)
                 end
-                v_k1 = (eye(12) - F) \ CtQyr_(:, k+M);
+                v_k1 = (eye(12) - F) \ C'*Qy*r_(:, k+M);
                 for j = nsteps:-1:1
-                    v_k1 = F*v_k1 + CtQyr_(:, k+j);
+                    v_k1 = F*v_k1 + C'*Qy*r_(:, k+j);
                 end
             else
                 d_tail = df(end);
@@ -122,12 +110,12 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                 end
 
                 % Backward recursion
-                v_k1 = (eye(12) - F) \ CtQyr_(:, k+M);
+                v_k1 = (eye(12) - F) \ C'*Qy*r_(:, k+M);
 
                 % (a) tail blocks (farthest from k)
                 for b = tail_nblk:-1:1
                     jblk = tier_lo(ntiers) + (b-1)*d_tail;
-                    v_k1 = Fd{ntiers}*v_k1 + Gd{ntiers}*mean(CtQyr_(:, k+jblk : k+jblk+d_tail-1), 2);
+                    v_k1 = Fd{ntiers}*v_k1 + Gd{ntiers}*mean(C'*Qy*r_(:, k+jblk : k+jblk+d_tail-1), 2);
                 end
 
                 % (b) intermediate tiers (farthest to nearest)
@@ -135,13 +123,13 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                     d_i = df(i);
                     for b = nb:-1:1
                         jblk = tier_lo(i) + (b-1)*d_i;
-                        v_k1 = Fd{i}*v_k1 + Gd{i}*mean(CtQyr_(:, k+jblk : k+jblk+d_i-1), 2);
+                        v_k1 = Fd{i}*v_k1 + Gd{i}*mean(C'*Qy*r_(:, k+jblk : k+jblk+d_i-1), 2);
                     end
                 end
 
                 % (c) leftover fine steps (nearest to k — highest value)
                 for j = leftover:-1:1
-                    v_k1 = F*v_k1 + CtQyr_(:, k+j);
+                    v_k1 = F*v_k1 + C'*Qy*r_(:, k+j);
                 end
             end
 
@@ -168,7 +156,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                     K_j    = (R + B'*P*B) \ (B'*P*A);
                     A_cl_j = A - B*K_j;
                     P      = C'*Qy*C + K_j'*R*K_j + A_cl_j'*P*A_cl_j;
-                    v      = A_cl_j'*v + CtQyr_(:, k+j);
+                    v      = A_cl_j'*v + C'*Qy*r_(:, k+j);
                 end
             else
                 d_tail = df(end);
@@ -219,7 +207,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                     K_b    = (Rdt{ntiers} + Bdt{ntiers}'*P*Bdt{ntiers}) \ (Bdt{ntiers}'*P*Adt{ntiers});
                     A_cl_b = Adt{ntiers} - Bdt{ntiers}*K_b;
                     P      = C'*Qydt{ntiers}*C + K_b'*Rdt{ntiers}*K_b + A_cl_b'*P*A_cl_b;
-                    v      = A_cl_b'*v + d_tail * mean(CtQyr_(:, k+jblk : k+jblk+d_tail-1), 2);
+                    v      = A_cl_b'*v + d_tail * mean(C'*Qy*r_(:, k+jblk : k+jblk+d_tail-1), 2);
                 end
 
                 % (b) intermediate tiers (farthest to nearest)
@@ -230,7 +218,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                         K_b    = (Rdt{i} + Bdt{i}'*P*Bdt{i}) \ (Bdt{i}'*P*Adt{i});
                         A_cl_b = Adt{i} - Bdt{i}*K_b;
                         P      = C'*Qydt{i}*C + K_b'*Rdt{i}*K_b + A_cl_b'*P*A_cl_b;
-                        v      = A_cl_b'*v + d_i * mean(CtQyr_(:, k+jblk : k+jblk+d_i-1), 2);
+                        v      = A_cl_b'*v + d_i * mean(C'*Qy*r_(:, k+jblk : k+jblk+d_i-1), 2);
                     end
                 end
 
@@ -239,7 +227,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                     K_j    = (R + B'*P*B) \ (B'*P*A);
                     A_cl_j = A - B*K_j;
                     P      = C'*Qy*C + K_j'*R*K_j + A_cl_j'*P*A_cl_j;
-                    v      = A_cl_j'*v + CtQyr_(:, k+j);
+                    v      = A_cl_j'*v + C'*Qy*r_(:, k+j);
                 end
             end
 
