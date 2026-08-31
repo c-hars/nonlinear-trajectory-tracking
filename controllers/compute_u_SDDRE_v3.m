@@ -11,8 +11,8 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
         Qyf
         tf
         qp
-        opts.DecimationFactor = 1 % scalar or ascending vector of DFs (geometric tiers). Tiers 1..end-1 are intermediate (each gets StepsPerTier decimated steps); last element is the tail DF filling the rest of the horizon.
-        opts.StepsPerTier     = 3 % number of decimated steps per intermediate tier
+        opts.DecimationFactors = 1 % scalar or ascending vector of decimation factors. Tiers 1..end-1 are near-horizon (each gets StepsPerTier coarse steps); last element is the far-horizon tier absorbing the rest.
+        opts.StepsPerTier      = 1 % number of coarse steps per near-horizon tier
         opts.SDC_A_function = @ get_A_matrix_SDRE_EulerAttitude
         opts.SDC_B_function = @ get_B_matrix_SDRE
         opts.PreviewHorizon = 2.0 % this is all really designed for finite-horizon formulations, with the horizon large (>= 2.0 for our case) -- but inf is a safe choice, just get delayed tracking
@@ -31,6 +31,8 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
     uk = min(uk,  qp.max_du(:));
     Bc = opts.SDC_B_function(uk, qp);
     [A,B] = c2d_zoh_expm(Ac,Bc,qp.Ts);
+    % A = eye(12) + Ac*qp.Ts;
+    % B = Bc*qp.Ts;
     solve_info.TimeToComputeDiscreteSDCMatrices = toc(clock_start);
 
 
@@ -45,97 +47,115 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
     solve_info.TimeToSolveDARE = toc(clock_start);
     
 
-    % --- 3. Compute the feedforward (reference preview) term ---
+    % --- 3. Compute the feedforward (preview) term ---
     
     clock_start = tic;
     A_cl  = A - B*K_ss;
 
     if isinf(opts.PreviewHorizon)
         % Constant reference approximation
-        s_k1  = (eye(12) - A_cl') \ (C'*Qy*r_(:,k));
-        u = -K_ss*xk + (R + B'*P_ss*B) \ (B'*s_k1);
+        v_k1  = (eye(12) - A_cl') \ (C'*Qy*r_(:,k));
+        u = -K_ss*xk + (R + B'*P_ss*B) \ (B'*v_k1);
 
     else
-        M = round(opts.PreviewHorizon/qp.Ts);   % receding horizon preview window
-        approachingTerminal = (k+M >= length(r_));
+        n_preview = round(opts.PreviewHorizon/qp.Ts);   % receding horizon preview window
+        approachingTerminal = (k + n_preview >= length(r_));
 
-        % Geometric tier decimation setup (shared by both branches)
-        df = sort(opts.DecimationFactor(:)', 'ascend');
-        nb = opts.StepsPerTier;
-        ntiers = length(df);
+
+        % --- Preview grid terminology ---
+        % 
+        % Fine step: a prediction step of duration Ts.
+        %
+        % Coarse step: a prediction step covering more time than a fine step (duration > Ts). Lower model fidelity and accuracy, but faster compute (in aggregate). A coarse step has duration d*Ts, where `d` is the decimation factor; `d` consecutive fine steps are grouped and approximated as one coarse step.
+        %
+        % Block: each discrete-time step is over d*Ts seconds -- 'block' is shorthand for this chunk of time.
+        % 
+        % Coarse system matrices: (A_d,B_d,Qy_d,R_d) - the system matrices (A,B,Q,R) after applying a decimation factor. Represents the same underlying system dynamics (Ac,Bc) and OCP formulation (Qy_c,R_c), but discretised at a different (lower-resolution) sampling rate.
+        %
+        % Fine/coarse recursion: a backward recursion processing one fine/coarse step at a time.
+        % 
+        % Tier: a contiguous sequence of steps sharing the same decimation factor.
+        % - Far-horizon tier: the final tier -- farthest from the current time, and uses the largest decimation factor. Absorbs whatever horizon remains after the near-horizon tiers.
+        % - Near-horizon tier: any tier other than the far-horizon tier. Each holds StepsPerTier steps.
+        %
+        % Remainder fine steps: fine steps nearest to the current time that don't fit into the tier schedule; processed by the fine recursion.
+        %
+        % Preview grid: the full arrangement across the preview horizon. Forward in time:
+        %    remainder fine steps -> near-horizon tiers -> far-horizon tier -> preview endpoint
+        % The backward recursion processes this in reverse.
+
+
+
+        % Preview grid setup. Shared by both branches.
+        df_ = sort(opts.DecimationFactors(:)', 'ascend');
+        n_coarse_per_tier = opts.StepsPerTier;
+        n_tiers = length(df_);
 
         if ~(opts.AlwaysUseFullFiniteHorizonMPC || (opts.UseFullFiniteHorizonMPCAtTerminal && approachingTerminal))
 
             F = A_cl';
-            nsteps = M - 1;
+            n_fine = n_preview - 1;
+            n_fine_near = n_coarse_per_tier * sum(df_(1:end-1));
 
-            % Partition horizon into geometric tiers
-            %   Layout from k outward (j=1 nearest):
-            %     leftover | tier 1 (nb blocks @ df(1)) | tier 2 (nb @ df(2)) | ... | tail (df(end))
-            %   Leftover fine steps sit at the near end — highest marginal value for resolution.
-            nearfield_fine = nb * sum(df(1:end-1));  % fine steps consumed by intermediate tiers
-
-            if nearfield_fine >= nsteps
-                % Tiers alone fill the horizon — fall back to full-rate recursion
+            if n_fine_near >= n_fine
+                % Fall back to fine recursion
                 if k == 1
-                    warning('compute_u_SDDRE_v3: nearfield tiers (%d fine steps) exceed horizon (%d). Falling back to full-rate.', nearfield_fine, nsteps)
+                    warning('compute_u_SDDRE_v3: near-horizon tiers (%d fine steps) exceed horizon (%d). Falling back to fine recursion.', n_fine_near, n_fine)
                 end
-                v_k1 = (eye(12) - F) \ C'*Qy*r_(:, k+M);
-                for j = nsteps:-1:1
+                v_k1 = (eye(12) - F) \ C'*Qy*r_(:, k+n_preview);
+                for j = n_fine:-1:1
                     v_k1 = F*v_k1 + C'*Qy*r_(:, k+j);
                 end
             else
-                d_tail = df(end);
-                tail_avail = nsteps - nearfield_fine;
-                tail_nblk  = floor(tail_avail / d_tail);
-                leftover   = nsteps - nearfield_fine - tail_nblk * d_tail;
+                % Decimated preview recursion
+                n_fine_far   = n_fine - n_fine_near;
+                n_coarse_far = floor(n_fine_far / df_(end));
+                n_fine_rem   = n_fine_far - n_coarse_far * df_(end);
 
-                % Tier start indices (fine-step offset from k+1, nearest first)
-                % Leftover occupies j = 1..leftover, then tiers start after
-                tier_lo = zeros(1, ntiers);
-                cursor = leftover + 1;
-                for i = 1:ntiers-1
-                    tier_lo(i) = cursor;
-                    cursor = cursor + nb * df(i);
+                tier_start = zeros(1, n_tiers);
+                cursor = n_fine_rem + 1;
+                for i = 1:n_tiers-1
+                    tier_start(i) = cursor;
+                    cursor = cursor + n_coarse_per_tier * df_(i);
                 end
-                tier_lo(ntiers) = cursor;  % tail starts here
+                tier_start(n_tiers) = cursor;  % far-horizon tier starts here
 
                 % Precompute F^d and G_d = (I - F^d)(I - F)^{-1} = sum_{i=0}^{d-1} F^i for each tier
-                Ginf = (eye(12) - F) \ eye(12);
-                Fd = cell(1, ntiers);
-                Gd = cell(1, ntiers);
-                for i = 1:ntiers
-                    Fd{i} = F^df(i);
-                    Gd{i} = (eye(12) - Fd{i}) * Ginf;
+                G_inf = (eye(12) - F) \ eye(12);
+                F_d = cell(1, n_tiers);
+                G_d = cell(1, n_tiers);
+                for i = 1:n_tiers
+                    F_d{i} = F^df_(i);
+                    G_d{i} = (eye(12) - F_d{i}) * G_inf;
                 end
 
-                % Backward recursion
-                v_k1 = (eye(12) - F) \ C'*Qy*r_(:, k+M);
+                % --- Backward recursion ---
 
-                % (a) tail blocks (farthest from k)
-                for b = tail_nblk:-1:1
-                    jblk = tier_lo(ntiers) + (b-1)*d_tail;
-                    v_k1 = Fd{ntiers}*v_k1 + Gd{ntiers}*mean(C'*Qy*r_(:, k+jblk : k+jblk+d_tail-1), 2);
+                v_k1 = (eye(12) - F) \ C'*Qy*r_(:, k+n_preview);
+
+                % (a) far-horizon tier
+                for b = n_coarse_far:-1:1
+                    j_blk = tier_start(n_tiers) + (b-1)*df_(end);
+                    v_k1 = F_d{n_tiers}*v_k1 + G_d{n_tiers}*mean(C'*Qy*r_(:, k+j_blk : k+j_blk+df_(end)-1), 2);
                 end
 
-                % (b) intermediate tiers (farthest to nearest)
-                for i = (ntiers-1):-1:1
-                    d_i = df(i);
-                    for b = nb:-1:1
-                        jblk = tier_lo(i) + (b-1)*d_i;
-                        v_k1 = Fd{i}*v_k1 + Gd{i}*mean(C'*Qy*r_(:, k+jblk : k+jblk+d_i-1), 2);
+                % (b) near-horizon tiers
+                for i = (n_tiers-1):-1:1
+                    for b = n_coarse_per_tier:-1:1
+                        j_blk = tier_start(i) + (b-1)*df_(i);
+                        v_k1 = F_d{i}*v_k1 + G_d{i}*mean(C'*Qy*r_(:, k+j_blk : k+j_blk+df_(i)-1), 2);
                     end
                 end
 
-                % (c) leftover fine steps (nearest to k — highest value)
-                for j = leftover:-1:1
+                % (c) remainder fine steps (computed closest to k)
+                for j = n_fine_rem:-1:1
                     v_k1 = F*v_k1 + C'*Qy*r_(:, k+j);
                 end
             end
 
             u = -K_ss*xk + (R + B'*P_ss*B) \ (B'*v_k1);
 
-            solve_info.NearfieldTime = nearfield_fine * qp.Ts;
+            solve_info.NearHorizonTime = n_fine_near * qp.Ts;
 
         else
             % Approaching terminal state.
@@ -143,115 +163,111 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
             % This ensures K is ramped up appropriately according to Qyf.
             % (This is then exactly equivalent to LQT MPC using frozen A_SDC(xk), B_SDC(xk))
             P = C'*Qyf*C;
-            M = min(M, length(r_) - k);
-            v = C'*Qyf*r_(:, k+M);
-            nsteps = M - 1;
+            n_preview = min(n_preview, length(r_) - k);
+            v_k1 = C'*Qyf*r_(:, k+n_preview);
+            n_fine = n_preview - 1;
 
-            % Partition horizon into geometric tiers (same structure as non-terminal branch)
-            nearfield_fine = nb * sum(df(1:end-1));
+            % Partition horizon into tiers (same structure as non-terminal branch)
+            n_fine_near = n_coarse_per_tier * sum(df_(1:end-1));
 
-            if nearfield_fine >= nsteps
-                % Tiers alone fill the horizon — fall back to full-rate recursion
-                for j = nsteps:-1:1
+            if n_fine_near >= n_fine
+                % Tiers alone fill the horizon — fall back to fine recursion
+                for j = n_fine:-1:1
                     K_j    = (R + B'*P*B) \ (B'*P*A);
                     A_cl_j = A - B*K_j;
                     P      = C'*Qy*C + K_j'*R*K_j + A_cl_j'*P*A_cl_j;
-                    v      = A_cl_j'*v + C'*Qy*r_(:, k+j);
+                    v_k1   = A_cl_j'*v_k1 + C'*Qy*r_(:, k+j);
                 end
             else
-                d_tail = df(end);
-                tail_avail = nsteps - nearfield_fine;
-                tail_nblk  = floor(tail_avail / d_tail);
-                leftover   = nsteps - nearfield_fine - tail_nblk * d_tail;
+                n_fine_far   = n_fine - n_fine_near;
+                n_coarse_far = floor(n_fine_far / df_(end));
+                n_fine_rem   = n_fine_far - n_coarse_far * df_(end);
 
-                % Leftover occupies j = 1..leftover, then tiers start after
-                tier_lo = zeros(1, ntiers);
-                cursor = leftover + 1;
-                for i = 1:ntiers-1
-                    tier_lo(i) = cursor;
-                    cursor = cursor + nb * df(i);
+                % Remainder occupies j = 1..remainder, then tiers start after
+                tier_start = zeros(1, n_tiers);
+                cursor = n_fine_rem + 1;
+                for i = 1:n_tiers-1
+                    tier_start(i) = cursor;
+                    cursor = cursor + n_coarse_per_tier * df_(i);
                 end
-                tier_lo(ntiers) = cursor;
+                tier_start(n_tiers) = cursor;
 
-                % Precompute decimated system matrices for each tier
-                % > Exact ZOH discretisation at d*Ts, built from the fine-step (A,B)  
-                % > Taking d fine steps with a constant input is the same as one coarse step
-                %   with Ad = A^d and Bd = (I + A + A^2 + ... + A^{d-1}) * B = Gd * B
-                Adt  = cell(1, ntiers);
-                Bdt  = cell(1, ntiers);
-                Qydt = cell(1, ntiers);
-                Rdt  = cell(1, ntiers);
-                for i = 1:ntiers
-                    d = df(i);
-                    if d == 1
-                        Adt{i} = A; Bdt{i} = B; Qydt{i} = Qy; Rdt{i} = R;
+                % Precompute coarse system matrices for each tier
+                % > A_d = A^d, B_d = (I + A + ... + A^{d-1}) * B — exact
+                %   ZOH discretisation at d*Ts built from the fine-step (A,B).
+                % > Taking d fine steps with constant input = one coarse step.
+                A_d  = cell(1, n_tiers);
+                B_d  = cell(1, n_tiers);
+                Qy_d = cell(1, n_tiers);
+                R_d  = cell(1, n_tiers);
+                for i = 1:n_tiers
+                    if df_(i) == 1
+                        A_d{i} = A; B_d{i} = B; Qy_d{i} = Qy; R_d{i} = R;
                     else
-                        Apow = eye(12);
-                        G    = eye(12);
-                        for p = 1:d-1
-                            Apow = A * Apow;
-                            G    = G + Apow;
+                        A_pow = eye(12);
+                        G     = eye(12);
+                        for p = 1:df_(i)-1
+                            A_pow = A * A_pow;
+                            G     = G + A_pow;
                         end
-                        Adt{i}  = A * Apow;
-                        Bdt{i}  = G * B;
-                        Qydt{i} = Qy * d;
-                        Rdt{i}  = R * d;
+                        A_d{i}  = A * A_pow;
+                        B_d{i}  = G * B;
+                        Qy_d{i} = Qy * df_(i);
+                        R_d{i}  = R * df_(i);
                     end
                 end
 
                 % Backward recursion
 
-                % (a) tail blocks (farthest from k)
-                for b = tail_nblk:-1:1
-                    jblk   = tier_lo(ntiers) + (b-1)*d_tail;
-                    K_b    = (Rdt{ntiers} + Bdt{ntiers}'*P*Bdt{ntiers}) \ (Bdt{ntiers}'*P*Adt{ntiers});
-                    A_cl_b = Adt{ntiers} - Bdt{ntiers}*K_b;
-                    P      = C'*Qydt{ntiers}*C + K_b'*Rdt{ntiers}*K_b + A_cl_b'*P*A_cl_b;
-                    v      = A_cl_b'*v + d_tail * mean(C'*Qy*r_(:, k+jblk : k+jblk+d_tail-1), 2);
+                % (a) far-horizon tier (farthest from k)
+                for b = n_coarse_far:-1:1
+                    j_blk  = tier_start(n_tiers) + (b-1)*df_(end);
+                    K_b    = (R_d{n_tiers} + B_d{n_tiers}'*P*B_d{n_tiers}) \ (B_d{n_tiers}'*P*A_d{n_tiers});
+                    A_cl_b = A_d{n_tiers} - B_d{n_tiers}*K_b;
+                    P      = C'*Qy_d{n_tiers}*C + K_b'*R_d{n_tiers}*K_b + A_cl_b'*P*A_cl_b;
+                    v_k1   = A_cl_b'*v_k1 + df_(end) * mean(C'*Qy*r_(:, k+j_blk : k+j_blk+df_(end)-1), 2);
                 end
 
-                % (b) intermediate tiers (farthest to nearest)
-                for i = (ntiers-1):-1:1
-                    d_i = df(i);
-                    for b = nb:-1:1
-                        jblk   = tier_lo(i) + (b-1)*d_i;
-                        K_b    = (Rdt{i} + Bdt{i}'*P*Bdt{i}) \ (Bdt{i}'*P*Adt{i});
-                        A_cl_b = Adt{i} - Bdt{i}*K_b;
-                        P      = C'*Qydt{i}*C + K_b'*Rdt{i}*K_b + A_cl_b'*P*A_cl_b;
-                        v      = A_cl_b'*v + d_i * mean(C'*Qy*r_(:, k+jblk : k+jblk+d_i-1), 2);
+                % (b) near-horizon tiers (farthest to nearest)
+                for i = (n_tiers-1):-1:1
+                    for b = n_coarse_per_tier:-1:1
+                        j_blk  = tier_start(i) + (b-1)*df_(i);
+                        K_b    = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i});
+                        A_cl_b = A_d{i} - B_d{i}*K_b;
+                        P      = C'*Qy_d{i}*C + K_b'*R_d{i}*K_b + A_cl_b'*P*A_cl_b;
+                        v_k1   = A_cl_b'*v_k1 + df_(i) * mean(C'*Qy*r_(:, k+j_blk : k+j_blk+df_(i)-1), 2);
                     end
                 end
 
-                % (c) leftover fine steps (nearest to k — highest value)
-                for j = leftover:-1:1
+                % (c) remainder fine steps (nearest to k — highest value)
+                for j = n_fine_rem:-1:1
                     K_j    = (R + B'*P*B) \ (B'*P*A);
                     A_cl_j = A - B*K_j;
                     P      = C'*Qy*C + K_j'*R*K_j + A_cl_j'*P*A_cl_j;
-                    v      = A_cl_j'*v + C'*Qy*r_(:, k+j);
+                    v_k1   = A_cl_j'*v_k1 + C'*Qy*r_(:, k+j);
                 end
             end
 
             Kk  = (R + B'*P*B) \ (B'*P*A);
             Kvk = (R + B'*P*B) \ B';
-            u   = -Kk*xk + Kvk*v;
+            u   = -Kk*xk + Kvk*v_k1;
 
-            solve_info.NearfieldTime = nearfield_fine * qp.Ts;
+            solve_info.NearHorizonTime = n_fine_near * qp.Ts;
         end
 
-        % One-time diagnostic: print the decimation schedule
-        if k == 1 && ~(nearfield_fine >= nsteps)
-            tail_nblk = floor((M - 1 - nearfield_fine) / df(end));
-            nblks = [repmat(nb, 1, ntiers-1), tail_nblk];
-            fine  = nblks .* df;
+        % One-time diagnostic: print the preview grid
+        if k == 1 && ~(n_fine_near >= n_fine)
+            n_coarse_tier = [repmat(n_coarse_per_tier, 1, n_tiers-1), n_coarse_far];
+            n_fine_tier   = n_coarse_tier .* df_;
 
-            fprintf('  Decimation schedule (%d steps/tier, %d leftover):\n', nb, leftover);
-            fprintf('         DF: %s\n', sprintf('%6d', df));
-            fprintf('  FineSteps: %s  (+ %d = %d)\n', sprintf('%6d', fine), leftover, sum(fine) + leftover);
-            fprintf('       Span: %s s  (tail: %.1f Hz)\n', sprintf('%6.3f', fine * qp.Ts), 1/(df(end)*qp.Ts));
+            fprintf('  Preview grid (%d steps/tier, %d remainder):\n', n_coarse_per_tier, n_fine_rem);
+            fprintf('         DF: %s\n', sprintf('%6d', df_));
+            fprintf('  FineSteps: %s  (+ %d = %d)\n', sprintf('%6d', n_fine_tier), n_fine_rem, sum(n_fine_tier) + n_fine_rem);
+            fprintf('       Span: %s s  (far-horizon: %.1f Hz)\n', sprintf('%6.3f', n_fine_tier * qp.Ts), 1/(df_(end)*qp.Ts));
         end
 
-        solve_info.DecimationTiers = df;
-        solve_info.StepsPerTier    = nb;
+        solve_info.DecimationFactors = df_;
+        solve_info.StepsPerTier      = n_coarse_per_tier;
     end
     solve_info.TimeToComputeFeedforward = toc(clock_start);
 end

@@ -3,13 +3,13 @@ function [u, solve_info] = compute_u_SDOPT(t, x, k, u_prev, ...
     arguments
         t; x; k; u_prev
         r_; C; Qy; R; Qyf; qp
-        options.PreviewHorizon   = 2.0
-        options.SDC_A_function   = []
-        options.SDC_B_function   = []
-        options.DARESolver       = 'nk'
-        options.DARESolverOpts   = struct()
-        options.DecimationFactor = 1
-        options.StepsPerTier     = 3
+        options.PreviewHorizon    = 2.0
+        options.SDC_A_function    = []
+        options.SDC_B_function    = []
+        options.DARESolver        = 'nk'
+        options.DARESolverOpts    = struct()
+        options.DecimationFactors = 1
+        options.StepsPerTier      = 1
     end
 
     [u, solve_info] = compute_u_SDDRE_v3([], x, k, u_prev, ...
@@ -21,6 +21,6 @@ function [u, solve_info] = compute_u_SDOPT(t, x, k, u_prev, ...
         SDC_B_function                    = options.SDC_B_function, ...
         DARESolver                        = options.DARESolver, ...
         DARESolverOpts                    = options.DARESolverOpts, ...
-        DecimationFactor                  = options.DecimationFactor, ...
+        DecimationFactors                 = options.DecimationFactors, ...
         StepsPerTier                      = options.StepsPerTier);
 end
