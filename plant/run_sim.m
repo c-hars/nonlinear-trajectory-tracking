@@ -39,7 +39,7 @@ function [T,X,U,compute_time_ctrl,compute_time_ode45,solve_info,U_raw,status] = 
     T(1) = 0;
     X(1,:) = x0;
 
-    status = struct('diverged', false, 'k_abort', NaN, 't_abort', NaN, 'message', "");
+    status = struct('diverged', false, 'k_abort', NaN, 't_abort', NaN, 'message', "", 'identifier', "");
 
     switch lower(opts.AttitudeRepresentation)
         case 'quaternion'
@@ -52,6 +52,8 @@ function [T,X,U,compute_time_ctrl,compute_time_ode45,solve_info,U_raw,status] = 
     run_clock = tic;
     for k = 1:N
 
+        t = (k-1) * dt;
+
         if toc(run_clock) > opts.MaxWallClock
             status.diverged    = true;
             status.k_abort     = k;
@@ -59,13 +61,11 @@ function [T,X,U,compute_time_ctrl,compute_time_ode45,solve_info,U_raw,status] = 
             status.message     = sprintf("Wall-clock budget %.0fs exceeded at k=%d", opts.MaxWallClock, k);
             status.identifier  = "ctrl:wallclock";
             warning("ABORTING: %s", status.message)
-            n_keep = (k-2)*M + 1;
+            n_keep = (k-1)*M + 1;
             [T,X,U,U_raw,compute_time_ctrl,compute_time_ode45,solve_info] = ...
                 truncate_data(n_keep, k, T, X, U, U_raw, compute_time_ctrl, compute_time_ode45, solve_info);
             return
         end
-
-        t = (k-1) * dt;
 
         % Compute control input (ZOH for next Ts)
         clock_start = tic;

@@ -60,10 +60,10 @@ function [Q, R, C, Qy, Qyf, Q_euler, sel] = get_weights(qp, AttRep, opts)
 
     % Terminal weight: DARE in Euler coords, project, clean, transform
     [A0, B0] = c2d_zoh_expm(get_A_matrix(), get_B_matrix(qp), qp.Ts);
-    P   = idare(A0, B0, C' * Qy_eul * C, R);
+    P   = dare_sda(A0, B0, C' * Qy_eul * C, R, 'Tolerance', 1e-11);
     Qyf = P(sel, sel);
 
-    % Mask numerical noise (odd tiny negatives from idare)
+    % Mask numerical noise (odd tiny negatives from the dare solve)
     mask_thresh = 1e-9 * max(abs(Qyf), [], 'all');
     Qyf(abs(Qyf) < mask_thresh) = 0;
 
