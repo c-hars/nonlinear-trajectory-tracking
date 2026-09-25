@@ -136,14 +136,14 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                 % (a) far-horizon tier
                 for b = n_coarse_far:-1:1
                     j_blk = tier_start(n_tiers) + (b-1)*df_(end);
-                    v_k1 = F_d{n_tiers}*v_k1 + G_d{n_tiers}*mean(C'*Qy*r_(:, k+j_blk : k+j_blk+df_(end)-1), 2);
+                    v_k1 = F_d{n_tiers}*v_k1 + G_d{n_tiers}*C'*Qy*mean(r_(:, k+j_blk : k+j_blk+df_(end)-1), 2);
                 end
 
                 % (b) near-horizon tiers
                 for i = (n_tiers-1):-1:1
                     for b = n_coarse_per_tier:-1:1
                         j_blk = tier_start(i) + (b-1)*df_(i);
-                        v_k1 = F_d{i}*v_k1 + G_d{i}*mean(C'*Qy*r_(:, k+j_blk : k+j_blk+df_(i)-1), 2);
+                        v_k1 = F_d{i}*v_k1 + G_d{i}*C'*Qy*mean(r_(:, k+j_blk : k+j_blk+df_(i)-1), 2);
                     end
                 end
 
@@ -173,10 +173,10 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
             if n_fine_near >= n_fine
                 % Tiers alone fill the horizon — fall back to fine recursion
                 for j = n_fine:-1:1
-                    K_j    = (R + B'*P*B) \ (B'*P*A);
-                    A_cl_j = A - B*K_j;
-                    P      = C'*Qy*C + K_j'*R*K_j + A_cl_j'*P*A_cl_j;
-                    v_k1   = A_cl_j'*v_k1 + C'*Qy*r_(:, k+j);
+                    K     = (R + B'*P*B) \ (B'*P*A);
+                    A_cl  = A - B*K;
+                    P     = C'*Qy*C + K'*R*K + A_cl'*P*A_cl;
+                    v_k1  = A_cl'*v_k1 + C'*Qy*r_(:, k+j);
                 end
             else
                 n_fine_far   = n_fine - n_fine_near;
@@ -200,20 +200,23 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                 B_d  = cell(1, n_tiers);
                 Qy_d = cell(1, n_tiers);
                 R_d  = cell(1, n_tiers);
+                A_p  = eye(12);
+                B_p  = zeros(12, 6);
+                p    = 0;
                 for i = 1:n_tiers
                     if df_(i) == 1
                         A_d{i} = A; B_d{i} = B; Qy_d{i} = Qy; R_d{i} = R;
                     else
-                        A_pow = eye(12);
-                        G     = eye(12);
-                        for p = 1:df_(i)-1
-                            A_pow = A * A_pow;
-                            G     = G + A_pow;
+                        % Step up the powers to the current decimation factor
+                        while p < df_(i)
+                            B_p = A * B_p + B;
+                            A_p = A * A_p;
+                            p   = p + 1;
                         end
-                        A_d{i}  = A * A_pow;
-                        B_d{i}  = G * B;
-                        Qy_d{i} = Qy * df_(i);
-                        R_d{i}  = R * df_(i);
+                        A_d{i}  = A_p;
+                        B_d{i}  = B_p;
+                        Qy_d{i} = df_(i) * Qy;
+                        R_d{i}  = df_(i) * R;
                     end
                 end
 
@@ -225,7 +228,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                     K_b    = (R_d{n_tiers} + B_d{n_tiers}'*P*B_d{n_tiers}) \ (B_d{n_tiers}'*P*A_d{n_tiers});
                     A_cl_b = A_d{n_tiers} - B_d{n_tiers}*K_b;
                     P      = C'*Qy_d{n_tiers}*C + K_b'*R_d{n_tiers}*K_b + A_cl_b'*P*A_cl_b;
-                    v_k1   = A_cl_b'*v_k1 + df_(end) * mean(C'*Qy*r_(:, k+j_blk : k+j_blk+df_(end)-1), 2);
+                    v_k1   = A_cl_b'*v_k1 + df_(end) * C'*Qy*mean(r_(:, k+j_blk : k+j_blk+df_(end)-1), 2);
                 end
 
                 % (b) near-horizon tiers (farthest to nearest)
@@ -235,16 +238,16 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
                         K_b    = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i});
                         A_cl_b = A_d{i} - B_d{i}*K_b;
                         P      = C'*Qy_d{i}*C + K_b'*R_d{i}*K_b + A_cl_b'*P*A_cl_b;
-                        v_k1   = A_cl_b'*v_k1 + df_(i) * mean(C'*Qy*r_(:, k+j_blk : k+j_blk+df_(i)-1), 2);
+                        v_k1   = A_cl_b'*v_k1 + df_(i) * C'*Qy*mean(r_(:, k+j_blk : k+j_blk+df_(i)-1), 2);
                     end
                 end
 
                 % (c) remainder fine steps (nearest to k — highest value)
                 for j = n_fine_rem:-1:1
-                    K_j    = (R + B'*P*B) \ (B'*P*A);
-                    A_cl_j = A - B*K_j;
-                    P      = C'*Qy*C + K_j'*R*K_j + A_cl_j'*P*A_cl_j;
-                    v_k1   = A_cl_j'*v_k1 + C'*Qy*r_(:, k+j);
+                    K    = (R + B'*P*B) \ (B'*P*A);
+                    A_cl = A - B*K;
+                    P      = C'*Qy*C + K'*R*K + A_cl'*P*A_cl;
+                    v_k1   = A_cl'*v_k1 + C'*Qy*r_(:, k+j);
                 end
             end
 
