@@ -214,7 +214,7 @@ function grid = build_horizon_grid(n_preview, DecimationOpts)
     grid.n_blocks = [repmat(n_coarse_per_tier, 1, n_tiers-1), n_coarse_far];  % coarse steps per tier
 
     tier_start = zeros(1, n_tiers);
-    cursor = 1;
+    cursor = n_fine_rem + 1;
     for i = 1:n_tiers-1
         tier_start(i) = cursor;
         cursor = cursor + n_coarse_per_tier * df_(i);
@@ -224,7 +224,6 @@ function grid = build_horizon_grid(n_preview, DecimationOpts)
     grid.n_coarse_far = n_coarse_far;
     grid.n_fine_rem   = n_fine_rem;
     grid.tier_start   = tier_start;
-    grid.rem_start    = cursor + n_coarse_far * df_(end);  % remainder fine steps start here
 end
 
 function v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid)
@@ -267,12 +266,7 @@ function v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid)
         G_d{i} = (eye(12) - F_d{i}) * G_inf;
     end
 
-    % remainder
-    for j = grid.rem_start + grid.n_fine_rem - 1 : -1 : grid.rem_start
-        v_k1 = F*v_k1 + C'*Qy*r_(:, k+j);
-    end
-    
-    % tiers - far-horizon first
+    % (a) + (b) coarse tiers - far-horizon first
     for i = n_tiers:-1:1
         d = df_(i);
         for b = grid.n_blocks(i):-1:1
@@ -282,6 +276,10 @@ function v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid)
         end
     end
 
+    % (c) remainder fine steps (computed closest to k)
+    for j = grid.n_fine_rem:-1:1
+        v_k1 = F*v_k1 + C'*Qy*r_(:, k+j);
+    end
 end
 
 function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, grid)
@@ -369,15 +367,7 @@ function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, g
         end
     end
 
-    % remainder
-    for j = grid.rem_start + grid.n_fine_rem - 1 : -1 : grid.rem_start
-        K    = (R + B'*P*B) \ (B'*P*A);
-        A_cl = A - B*K;
-        P    = C'*Qy*C + K'*R*K + A_cl'*P*A_cl;
-        v_k1 = A_cl'*v_k1 + C'*Qy*r_(:, k+j);
-    end
-
-    % tiers
+    % (a) + (b) coarse tiers - far-horizon first
     for i = n_tiers:-1:1
         d = df_(i);
         for b = grid.n_blocks(i):-1:1
@@ -389,6 +379,14 @@ function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, g
             P      = Q_d{i} + K_b'*R_d{i}*K_b - N_d{i}*K_b - K_b'*N_d{i}' + A_cl_b'*P*A_cl_b;
             v_k1   = A_cl_b'*v_k1 + (GA_d{i} - H_d{i}*K_b)'*q_bar;
         end
+    end
+
+    % (c) remainder fine steps (nearest to k - highest value)
+    for j = grid.n_fine_rem:-1:1
+        K    = (R + B'*P*B) \ (B'*P*A);
+        A_cl = A - B*K;
+        P    = C'*Qy*C + K'*R*K + A_cl'*P*A_cl;
+        v_k1 = A_cl'*v_k1 + C'*Qy*r_(:, k+j);
     end
 end
 
