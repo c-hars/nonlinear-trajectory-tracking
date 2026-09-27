@@ -214,7 +214,7 @@ function grid = build_horizon_grid(n_preview, DecimationOpts)
     grid.n_blocks = [repmat(n_coarse_per_tier, 1, n_tiers-1), n_coarse_far];  % coarse steps per tier
 
     tier_start = zeros(1, n_tiers);
-    cursor = n_fine_rem + 1;
+    cursor = 1;
     for i = 1:n_tiers-1
         tier_start(i) = cursor;
         cursor = cursor + n_coarse_per_tier * df_(i);
@@ -224,6 +224,7 @@ function grid = build_horizon_grid(n_preview, DecimationOpts)
     grid.n_coarse_far = n_coarse_far;
     grid.n_fine_rem   = n_fine_rem;
     grid.tier_start   = tier_start;
+    grid.rem_start    = cursor + n_coarse_far * df_(end);  % remainder fine steps start here
 end
 
 function v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid)
@@ -266,7 +267,12 @@ function v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid)
         G_d{i} = (eye(12) - F_d{i}) * G_inf;
     end
 
-    % (a) + (b) coarse tiers - far-horizon first
+    % remainder
+    for j = grid.rem_start + grid.n_fine_rem - 1 : -1 : grid.rem_start
+        v_k1 = F*v_k1 + C'*Qy*r_(:, k+j);
+    end
+    
+    % tiers - far-horizon first
     for i = n_tiers:-1:1
         d = df_(i);
         for b = grid.n_blocks(i):-1:1
@@ -276,10 +282,6 @@ function v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid)
         end
     end
 
-    % (c) remainder fine steps (computed closest to k)
-    for j = grid.n_fine_rem:-1:1
-        v_k1 = F*v_k1 + C'*Qy*r_(:, k+j);
-    end
 end
 
 function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, grid)
@@ -313,55 +315,80 @@ function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, g
     %   and
     %       B_d = (I + A + ... + A^{d-1}) B.
     %   This is exact: the same as discretising (Ac, Bc) directly at d*Ts.
-    % > The stage costs are approximated by summing over the d fine steps, evaluated at the block start:
-    %       Qy_d = d*Qy,  R_d = d*R.
-    %   R_d is exact (the input is held over the block), but Qy_d is not: it ignores how the state evolves within the block.
-    %   The exact version (Q_d = sum A^i'*Q*A^i, plus a state-input cross term) matches the undecimated recursion, though it adds complexity and performed slightly worse on the test case; the simple approximation is kept for now.
+    % > The stage costs are summed exactly over the d fine steps, using the intermediate states
+    %       x_i = A^i x + B_i u,   B_i = (I + A + ... + A^{i-1}) B,   i = 0 .. d-1
+    %   Summing x_i'*Q*x_i + u'*R*u over the block gives
+    %       x'*Q_d*x + 2*x'*N_d*u + u'*R_d*u
+    %   where
+    %       Q_d = sum A^i'*Q*A^i,   N_d = sum A^i'*Q*B_i,   R_d = d*R + sum B_i'*Q*B_i.
+    %   (The simpler held-state approximation Q_d = d*Q, N_d = 0, R_d = d*R assumes the state doesn't move within the block.)
+    % > The reference term (with r held at r_bar over the block) sums to
+    %       -2*(C'*Qy*r_bar)'*(GA_d*x + H_d*u),   GA_d = sum A^i,   H_d = sum B_i.
     % > Since the decimation factors are ascending, the powers A^p and B_p are built up incrementally as the decimation factor increases (rather than recomputed from scratch each time)
 
+    Q    = C'*Qy*C;
     A_d  = cell(1, n_tiers);
     B_d  = cell(1, n_tiers);
-    Qy_d = cell(1, n_tiers);
+    Q_d  = cell(1, n_tiers);
+    N_d  = cell(1, n_tiers);
     R_d  = cell(1, n_tiers);
+    GA_d = cell(1, n_tiers);
+    H_d  = cell(1, n_tiers);
     A_p  = eye(12);
     B_p  = zeros(12, 6);
+    Q_s  = zeros(12);      % running sums over i = 0 .. p-1
+    N_s  = zeros(12, 6);
+    S_s  = zeros(6);
+    GA_s = zeros(12);
+    H_s  = zeros(12, 6);
     p    = 0;
     for i = 1:n_tiers
         if df_(i) == 1
-            A_d{i} = A; B_d{i} = B; Qy_d{i} = Qy; R_d{i} = R;
+            A_d{i} = A; B_d{i} = B; Q_d{i} = Q; N_d{i} = zeros(12, 6); R_d{i} = R; GA_d{i} = eye(12); H_d{i} = zeros(12, 6);
         else
             % Step up the powers to the current decimation factor
             while p < df_(i)
+                % Stage cost of fine step p, with state x_p = A_p*x + B_p*u
+                Q_s  = Q_s  + A_p'*Q*A_p;
+                N_s  = N_s  + A_p'*Q*B_p;
+                S_s  = S_s  + B_p'*Q*B_p;
+                GA_s = GA_s + A_p;
+                H_s  = H_s  + B_p;
+
                 B_p = A * B_p + B;
                 A_p = A * A_p;
                 p   = p + 1;
             end
             A_d{i}  = A_p;
             B_d{i}  = B_p;
-            Qy_d{i} = df_(i) * Qy;
-            R_d{i}  = df_(i) * R;
+            Q_d{i}  = Q_s;
+            N_d{i}  = N_s;
+            R_d{i}  = df_(i) * R + S_s;
+            GA_d{i} = GA_s;
+            H_d{i}  = H_s;
         end
     end
 
-    % (a) + (b) coarse tiers - far-horizon first
+    % remainder
+    for j = grid.rem_start + grid.n_fine_rem - 1 : -1 : grid.rem_start
+        K    = (R + B'*P*B) \ (B'*P*A);
+        A_cl = A - B*K;
+        P    = C'*Qy*C + K'*R*K + A_cl'*P*A_cl;
+        v_k1 = A_cl'*v_k1 + C'*Qy*r_(:, k+j);
+    end
+
+    % tiers
     for i = n_tiers:-1:1
         d = df_(i);
         for b = grid.n_blocks(i):-1:1
             j_blk  = grid.tier_start(i) + (b-1)*d;
             r_bar  = mean(r_(:, k+j_blk : k+j_blk+d-1), 2);  % block-averaged reference
-            K_b    = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i});
+            q_bar  = C'*Qy*r_bar;
+            K_b    = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i} + N_d{i}');
             A_cl_b = A_d{i} - B_d{i}*K_b;
-            P      = C'*Qy_d{i}*C + K_b'*R_d{i}*K_b + A_cl_b'*P*A_cl_b;
-            v_k1   = A_cl_b'*v_k1 + d * C'*Qy*r_bar;
+            P      = Q_d{i} + K_b'*R_d{i}*K_b - N_d{i}*K_b - K_b'*N_d{i}' + A_cl_b'*P*A_cl_b;
+            v_k1   = A_cl_b'*v_k1 + (GA_d{i} - H_d{i}*K_b)'*q_bar;
         end
-    end
-
-    % (c) remainder fine steps (nearest to k - highest value)
-    for j = grid.n_fine_rem:-1:1
-        K    = (R + B'*P*B) \ (B'*P*A);
-        A_cl = A - B*K;
-        P    = C'*Qy*C + K'*R*K + A_cl'*P*A_cl;
-        v_k1 = A_cl'*v_k1 + C'*Qy*r_(:, k+j);
     end
 end
 
