@@ -313,57 +313,35 @@ function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, g
     %   and
     %       B_d = (I + A + ... + A^{d-1}) B.
     %   This is exact: the same as discretising (Ac, Bc) directly at d*Ts.
-    % > The stage costs are summed exactly over the d fine steps, using the intermediate states
-    %       x_i = A^i x + B_i u,   B_i = (I + A + ... + A^{i-1}) B,   i = 0 .. d-1
-    %   Summing x_i'*Q*x_i + u'*R*u over the block gives
-    %       x'*Q_d*x + 2*x'*N_d*u + u'*R_d*u
-    %   where
-    %       Q_d = sum A^i'*Q*A^i,   N_d = sum A^i'*Q*B_i,   R_d = d*R + sum B_i'*Q*B_i.
-    %   (The simpler held-state approximation Q_d = d*Q, N_d = 0, R_d = d*R assumes the state doesn't move within the block.)
-    % > The reference term (with r held at r_bar over the block) sums to
-    %       -2*(C'*Qy*r_bar)'*(GA_d*x + H_d*u),   GA_d = sum A^i,   H_d = sum B_i.
+    % > The stage costs are approximated by summing over the d fine steps, evaluated at the block start:
+    %       Qy_d = d*Qy,  Q_d = d*Q,  R_d = d*R.
+    %   R_d is exact (the input is held over the block), but Qy_d is not: it ignores how the state evolves within the block (held-state assumption).
+    %   The exact version maintains state evolution according to the undecimated dynamics, but it adds complexity, and performed slightly worse in general; the simpler held-x approximation is kept for now, consistent with the held-u assumption.
     % > Since the decimation factors are ascending, the powers A^p and B_p are built up incrementally as the decimation factor increases (rather than recomputed from scratch each time)
-
     Q    = C'*Qy*C;
     A_d  = cell(1, n_tiers);
     B_d  = cell(1, n_tiers);
+    Qy_d = cell(1, n_tiers);
     Q_d  = cell(1, n_tiers);
-    N_d  = cell(1, n_tiers);
     R_d  = cell(1, n_tiers);
-    GA_d = cell(1, n_tiers);
-    H_d  = cell(1, n_tiers);
     A_p  = eye(12);
     B_p  = zeros(12, 6);
-    Q_s  = zeros(12);      % running sums over i = 0 .. p-1
-    N_s  = zeros(12, 6);
-    S_s  = zeros(6);
-    GA_s = zeros(12);
-    H_s  = zeros(12, 6);
     p    = 0;
     for i = 1:n_tiers
         if df_(i) == 1
-            A_d{i} = A; B_d{i} = B; Q_d{i} = Q; N_d{i} = zeros(12, 6); R_d{i} = R; GA_d{i} = eye(12); H_d{i} = zeros(12, 6);
+            A_d{i} = A; B_d{i} = B; Qy_d{i} = Qy; Q_d{i} = Q; R_d{i} = R;
         else
             % Step up the powers to the current decimation factor
             while p < df_(i)
-                % Stage cost of fine step p, with state x_p = A_p*x + B_p*u
-                Q_s  = Q_s  + A_p'*Q*A_p;
-                N_s  = N_s  + A_p'*Q*B_p;
-                S_s  = S_s  + B_p'*Q*B_p;
-                GA_s = GA_s + A_p;
-                H_s  = H_s  + B_p;
-
                 B_p = A * B_p + B;
                 A_p = A * A_p;
                 p   = p + 1;
             end
             A_d{i}  = A_p;
             B_d{i}  = B_p;
-            Q_d{i}  = Q_s;
-            N_d{i}  = N_s;
-            R_d{i}  = df_(i) * R + S_s;
-            GA_d{i} = GA_s;
-            H_d{i}  = H_s;
+            Qy_d{i} = df_(i) * Qy;
+            Q_d{i}  = df_(i) * Q;
+            R_d{i}  = df_(i) * R;
         end
     end
 
@@ -373,11 +351,10 @@ function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, g
         for b = grid.n_blocks(i):-1:1
             j_blk  = grid.tier_start(i) + (b-1)*d;
             r_bar  = mean(r_(:, k+j_blk : k+j_blk+d-1), 2);  % block-averaged reference
-            q_bar  = C'*Qy*r_bar;
-            K_b    = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i} + N_d{i}');
+            K_b    = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i});
             A_cl_b = A_d{i} - B_d{i}*K_b;
-            P      = Q_d{i} + K_b'*R_d{i}*K_b - N_d{i}*K_b - K_b'*N_d{i}' + A_cl_b'*P*A_cl_b;
-            v_k1   = A_cl_b'*v_k1 + (GA_d{i} - H_d{i}*K_b)'*q_bar;
+            P      = Q_d{i} + K_b'*R_d{i}*K_b + A_cl_b'*P*A_cl_b;
+            v_k1   = A_cl_b'*v_k1 + C'*Qy_d{i}*r_bar;
         end
     end
 
@@ -385,7 +362,7 @@ function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, g
     for j = grid.n_fine_rem:-1:1
         K    = (R + B'*P*B) \ (B'*P*A);
         A_cl = A - B*K;
-        P    = C'*Qy*C + K'*R*K + A_cl'*P*A_cl;
+        P    = Q + K'*R*K + A_cl'*P*A_cl;
         v_k1 = A_cl'*v_k1 + C'*Qy*r_(:, k+j);
     end
 end
