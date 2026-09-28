@@ -147,33 +147,6 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
 
 end
 
-% --- Decimated recursion: glossary ---
-% Useful terminology for understanding the functions that follow.
-
-%   Fine step: a prediction step of duration Ts.
-%
-%   Coarse step: a prediction step covering more time than a fine step (duration > Ts); lower model fidelity, faster compute. A coarse step has duration d*Ts, where `d` is the decimation factor; `d` consecutive fine steps are grouped and approximated as one coarse step.
-%
-%   Block: each discrete-time step is over d*Ts seconds; 'block' is shorthand for this chunk of time.
-% 
-%   Coarse matrices: (A_d,B_d,Qy_d,R_d) - the system matrices (A,B,Q,R) after applying a decimation factor.
-%                    They represent the same continuous-time dynamics and OCP formulation (Ac,Bc,Qy_c,R_c), 
-%                    but discretised at a different (lower-resolution) sampling rate.
-%
-%   Fine recursion: a backward recursion processing one fine step at a time.
-
-%   Coarse recursion: a backward recursion processing one coarse step at a time.
-% 
-%   Tier: a contiguous sequence of steps sharing the same decimation factor.
-%   - Far-horizon tier: the final tier -- farthest from the current time, and uses the largest decimation factor. Absorbs whatever horizon remains after the near-horizon tiers.
-%   - Near-horizon tier: any tier other than the far-horizon tier. Each holds StepsPerTier steps.
-%
-%   Remainder fine steps: fine steps nearest to the current time that don't fit into the tier schedule; processed by the fine recursion.
-%
-%   Preview grid: the full arrangement across the preview horizon. Forward in time:
-%      remainder fine steps -> near-horizon tiers -> far-horizon tier -> preview endpoint
-%   The backward recursion processes this in reverse.
-
 function print_horizon_grid(grid, qp)
 % One-time diagnostic: print the preview grid
 
@@ -271,7 +244,8 @@ function v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid)
         d = df_(i);
         for b = grid.n_blocks(i):-1:1
             j_blk = grid.tier_start(i) + (b-1)*d;
-            r_bar = mean(r_(:, k+j_blk : k+j_blk+d-1), 2);  % block-averaged reference
+            r_bar = sum(r_(:, k+j_blk : k+j_blk+d-1), 2) / d;  % block-averaged reference
+            % r_bar = r_(:, k+j_blk+floor(d/2));
             v_k1  = F_d{i}*v_k1 + G_d{i}*C'*Qy*r_bar;
         end
     end
@@ -315,8 +289,8 @@ function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, g
     %   This is exact: the same as discretising (Ac, Bc) directly at d*Ts.
     % > The stage costs are approximated by summing over the d fine steps, evaluated at the block start:
     %       Qy_d = d*Qy,  Q_d = d*Q,  R_d = d*R.
-    %   R_d is exact (the input is held over the block), but Qy_d is not: it ignores how the state evolves within the block (held-state assumption).
-    %   The exact version maintains state evolution according to the undecimated dynamics, but it adds complexity, and performed slightly worse in general; the simpler held-x approximation is kept for now, consistent with the held-u assumption.
+    %   R_d is exact (the input is held over the block), Qy_d and Q_d are not: how the state evolves within each block is deliberately left out ("held-state assumption").
+    %   The exact version maintains state evolution according to the undecimated dynamics, but it adds complexity, and performed slightly worse in general; the simpler held-state approximation is kept for now, consistent with the held-u assumption.
     % > Since the decimation factors are ascending, the powers A^p and B_p are built up incrementally as the decimation factor increases (rather than recomputed from scratch each time)
     Q    = C'*Qy*C;
     A_d  = cell(1, n_tiers);
@@ -350,11 +324,12 @@ function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, g
         d = df_(i);
         for b = grid.n_blocks(i):-1:1
             j_blk  = grid.tier_start(i) + (b-1)*d;
-            r_bar  = mean(r_(:, k+j_blk : k+j_blk+d-1), 2);  % block-averaged reference
-            K_b    = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i});
-            A_cl_b = A_d{i} - B_d{i}*K_b;
-            P      = Q_d{i} + K_b'*R_d{i}*K_b + A_cl_b'*P*A_cl_b;
-            v_k1   = A_cl_b'*v_k1 + C'*Qy_d{i}*r_bar;
+            r_bar  = sum(r_(:, k+j_blk : k+j_blk+d-1), 2) / d;  % block-averaged reference
+            % r_bar = r_(:, k+j_blk+floor(d/2));
+            K    = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i});
+            A_cl = A_d{i} - B_d{i}*K;
+            P    = Q_d{i} + K'*R_d{i}*K + A_cl'*P*A_cl;
+            v_k1 = A_cl'*v_k1 + C'*Qy_d{i}*r_bar;
         end
     end
 
