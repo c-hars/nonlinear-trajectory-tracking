@@ -29,10 +29,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
         'DARESolverNumIters', NaN, ...
         'DARESolverSuccess', NaN, ...
         'TimeToSolveDARE', 0, ...
-        'TimeToComputeFeedforward', 0, ...
-        'NearHorizonTime', NaN, ...
-        'DecimationFactors', [], ...
-        'StepsPerTier', NaN);
+        'TimeToComputeFeedforward', 0);
 
 
     % --- 1. Compute the (ZOH-discretised) SDC matrices ---
@@ -137,7 +134,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
 
         % --- 2.2.3: Control input ---
 
-        solve_info.TimeToComputeFeedforward = toc(clock_start); % Note: slight misnomer here - should be TimeToComputeRecursion. Kept for now (maintain the same struct format as the SDOPT branch).
+        solve_info.TimeToComputeFeedforward = toc(clock_start); % Note: slight misnomer here - should be TimeToComputeRecursion. Kept for now (maintains the same struct format as the SDOPT branch).
 
         Kk  = (R + B'*P*B) \ (B'*P*A);
         Kvk = (R + B'*P*B) \ B';
@@ -154,7 +151,7 @@ function print_horizon_grid(grid, qp)
 
     n_fine_tier = grid.n_blocks .* grid.df_;
 
-    fprintf('  Preview grid (%d steps/tier, %d remainder):\n', grid.n_coarse_per_tier, grid.n_fine_rem);
+    fprintf('  Preview grid (%d steps/tier, %d remainder):\n', grid.n_steps_per_tier, grid.n_fine_rem);
     fprintf('         DF: %s\n', sprintf('%6d', grid.df_));
     fprintf('  FineSteps: %s  (+ %d = %d)\n', sprintf('%6d', n_fine_tier), grid.n_fine_rem, sum(n_fine_tier) + grid.n_fine_rem);
     fprintf('       Span: %s s  (far-horizon: %.1f Hz)\n', sprintf('%6.3f', n_fine_tier * qp.Ts), 1/(grid.df_(end)*qp.Ts));
@@ -164,15 +161,15 @@ function grid = build_horizon_grid(n_preview, DecimationOpts)
 % Partition the preview horizon into remainder fine steps, near-horizon tiers and the far-horizon tier.
 
     df_ = sort(DecimationOpts.DecimationFactors(:)', 'ascend');
-    n_coarse_per_tier = DecimationOpts.StepsPerTier;
+    n_steps_per_tier = DecimationOpts.StepsPerTier;
     n_tiers = length(df_);
 
     n_fine      = n_preview - 1;
-    n_fine_near = n_coarse_per_tier * sum(df_(1:end-1));
+    n_fine_near = n_steps_per_tier * sum(df_(1:end-1));
 
     grid.df_               = df_;
     grid.n_tiers           = n_tiers;
-    grid.n_coarse_per_tier = n_coarse_per_tier;
+    grid.n_steps_per_tier  = n_steps_per_tier;
     grid.n_fine            = n_fine;
     grid.n_fine_near       = n_fine_near;
     grid.use_fine_fallback = (n_fine_near >= n_fine);  % tiers alone fill the horizon
@@ -184,13 +181,13 @@ function grid = build_horizon_grid(n_preview, DecimationOpts)
     n_fine_far   = n_fine - n_fine_near;
     n_coarse_far = floor(n_fine_far / df_(end));
     n_fine_rem   = n_fine_far - n_coarse_far * df_(end);
-    grid.n_blocks = [repmat(n_coarse_per_tier, 1, n_tiers-1), n_coarse_far];  % coarse steps per tier
+    grid.n_blocks = [repmat(n_steps_per_tier, 1, n_tiers-1), n_coarse_far];  % coarse steps per tier
 
     tier_start = zeros(1, n_tiers);
     cursor = n_fine_rem + 1;
     for i = 1:n_tiers-1
         tier_start(i) = cursor;
-        cursor = cursor + n_coarse_per_tier * df_(i);
+        cursor = cursor + n_steps_per_tier * df_(i);
     end
     tier_start(n_tiers) = cursor;  % far-horizon tier starts here
 
@@ -200,7 +197,7 @@ function grid = build_horizon_grid(n_preview, DecimationOpts)
 end
 
 function v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid)
-% Decimated backward recursion for the SDOPT preview term
+% Decimated Riccati recursion (costate only - under preview control the cost-to-go and gain are fixed via P=P_ss, K=K_ss)
 
     v_k1 = (eye(12) - F) \ C'*Qy*r_(:, k+n_preview);  % SDOPT seed
 
@@ -218,12 +215,8 @@ function v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid)
     % Precompute the coarse preview matrices for each tier.
     % > The fine preview update is:
     %       v <- F*v + C'*Qy*r
-    %   Applying it d times, with r held constant:
-    %     after 1 step:   F v + C'Qy r
-    %     after 2 steps:  F^2 v + (F + I) C'Qy r
-    %     after d steps:  F^d v + (I + F + ... + F^{d-1}) C'Qy r
-    % > So d fine steps collapse into one coarse step:
-    %       v = F_d*v + G_d*C'*Qy*r
+    %   With r held constant, d fine steps collapse into one coarse step:
+    %       v <- F_d*v + G_d*C'*Qy*r
     %   where
     %       F_d = F^d
     %   and
@@ -239,32 +232,33 @@ function v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid)
         G_d{i} = (eye(12) - F_d{i}) * G_inf;
     end
 
-    % (a) + (b) coarse tiers - far-horizon first
+    % Recursion across the tiers (far-horizon and near-horizon)
     for i = n_tiers:-1:1
         d = df_(i);
         for b = grid.n_blocks(i):-1:1
             j_blk = grid.tier_start(i) + (b-1)*d;
             r_bar = sum(r_(:, k+j_blk : k+j_blk+d-1), 2) / d;  % block-averaged reference
-            % r_bar = r_(:, k+j_blk+floor(d/2));
             v_k1  = F_d{i}*v_k1 + G_d{i}*C'*Qy*r_bar;
         end
     end
 
-    % (c) remainder fine steps (computed closest to k)
+    % Recursion across the remainder fine steps
     for j = grid.n_fine_rem:-1:1
         v_k1 = F*v_k1 + C'*Qy*r_(:, k+j);
     end
 end
 
 function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, grid)
-% Decimated backward Riccati recursion for the gain and preview terms, from terminal conditions (P, v_k1).
+% Decimated Riccati recursion (cost-to-go and costate)
+
+    Q = C'*Qy*C;
 
     if grid.use_fine_fallback
         % Tiers alone fill the horizon - fall back to fine recursion
         for j = grid.n_fine:-1:1
             K    = (R + B'*P*B) \ (B'*P*A);
             A_cl = A - B*K;
-            P    = C'*Qy*C + K'*R*K + A_cl'*P*A_cl;
+            P    = Q + K'*R*K + A_cl'*P*A_cl;
             v_k1 = A_cl'*v_k1 + C'*Qy*r_(:, k+j);
         end
         return
@@ -274,25 +268,7 @@ function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, g
     n_tiers = grid.n_tiers;
 
     % Precompute the coarse system matrices for each tier.
-    % > The fine state update is:
-    %       x <- A*x + B*u
-    %   Applying it d times, with u held constant (ZOH):
-    %     after 1 step:   A x + B u
-    %     after 2 steps:  A^2 x + (A + I) B u
-    %     after d steps:  A^d x + (I + A + ... + A^{d-1}) B u
-    % > So d fine steps collapse into one coarse step:
-    %       x <- A_d*x + B_d*u,
-    %   where
-    %       A_d = A^d
-    %   and
-    %       B_d = (I + A + ... + A^{d-1}) B.
-    %   This is exact: the same as discretising (Ac, Bc) directly at d*Ts.
-    % > The stage costs are approximated by summing over the d fine steps, evaluated at the block start:
-    %       Qy_d = d*Qy,  Q_d = d*Q,  R_d = d*R.
-    %   R_d is exact (the input is held over the block), Qy_d and Q_d are not: how the state evolves within each block is deliberately left out ("held-state assumption").
-    %   The exact version maintains state evolution according to the undecimated dynamics, but it adds complexity, and performed slightly worse in general; the simpler held-state approximation is kept for now, consistent with the held-u assumption.
-    % > Since the decimation factors are ascending, the powers A^p and B_p are built up incrementally as the decimation factor increases (rather than recomputed from scratch each time)
-    Q    = C'*Qy*C;
+    % > Since the decimation factors are sorted in ascending order, the powers A^p and B_p can be built up incrementally as the decimation factor increases (rather than recomputed from scratch each time).
     A_d  = cell(1, n_tiers);
     B_d  = cell(1, n_tiers);
     Qy_d = cell(1, n_tiers);
@@ -319,21 +295,20 @@ function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, g
         end
     end
 
-    % (a) + (b) coarse tiers - far-horizon first
+    % Recursion across the tiers (far-horizon and near-horizon)
     for i = n_tiers:-1:1
         d = df_(i);
         for b = grid.n_blocks(i):-1:1
-            j_blk  = grid.tier_start(i) + (b-1)*d;
-            r_bar  = sum(r_(:, k+j_blk : k+j_blk+d-1), 2) / d;  % block-averaged reference
-            % r_bar = r_(:, k+j_blk+floor(d/2));
-            K    = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i});
-            A_cl = A_d{i} - B_d{i}*K;
-            P    = Q_d{i} + K'*R_d{i}*K + A_cl'*P*A_cl;
-            v_k1 = A_cl'*v_k1 + C'*Qy_d{i}*r_bar;
+            j_blk = grid.tier_start(i) + (b-1)*d;
+            r_bar = sum(r_(:, k+j_blk : k+j_blk+d-1), 2) / d;
+            K_d   = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i});
+            A_cl  = A_d{i} - B_d{i}*K_d;
+            P     = Q_d{i} + K_d'*R_d{i}*K_d + A_cl'*P*A_cl;
+            v_k1  = A_cl'*v_k1 + C'*Qy_d{i}*r_bar;
         end
     end
 
-    % (c) remainder fine steps (nearest to k - highest value)
+    % Recursion across the remainder fine steps
     for j = grid.n_fine_rem:-1:1
         K    = (R + B'*P*B) \ (B'*P*A);
         A_cl = A - B*K;
