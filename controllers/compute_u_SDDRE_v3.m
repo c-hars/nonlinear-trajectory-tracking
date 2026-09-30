@@ -16,6 +16,8 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
         opts.UseFullFiniteHorizonMPCAtTerminal = true % best set to false if you need precisely consistent/predictable solve times - adds a bit of overhead to do the full recursion for K too
         opts.AlwaysUseFullFiniteHorizonMPC = false % set to true → regression to the standard MPC cost function being optimised / directly comparable OCP with LinMPC, NLMPC -- no longer optimal preview control that uses the infinite/finite horizon split (core part of the algorithm!)
         opts.DecimationOpts = []  % example: struct('DecimationFactors', [1], 'StepsPerTier', 1)
+        opts.UseHeldXAssumption = true % false → exact block cost (cross term N_d, within-block costate terms). Only affects the decimated SD-MPC recursion
+        opts.PrintPreviewGrid = false
 
         opts.DARESolver (1,:) char {mustBeMember(opts.DARESolver, {'nk','riccati','cold','idare','dlqr','sda'})} = 'nk'
         opts.DARESolverOpts (1,1) struct = struct()
@@ -29,7 +31,8 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
         'DARESolverNumIters', NaN, ...
         'DARESolverSuccess', NaN, ...
         'TimeToSolveDARE', 0, ...
-        'TimeToComputeFeedforward', 0);
+        'TimeToComputeFeedforward', 0, ...
+        'PreviewGrid', []);
 
 
     % --- 1. Compute the (ZOH-discretised) SDC matrices ---
@@ -48,7 +51,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
     n_preview = round(opts.PreviewHorizon/qp.Ts);
 
     % One-time diagnostic: print the preview grid
-    if k == 1 && ~isinf(n_preview) && ~isempty(opts.DecimationOpts)
+    if k == 1 && opts.PrintPreviewGrid && ~isinf(n_preview) && ~isempty(opts.DecimationOpts)
         print_horizon_grid(build_horizon_grid(n_preview, opts.DecimationOpts), qp);
     end
 
@@ -92,6 +95,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
                 % Decimation: the preview grid is constructed and processed on a coarser layout - not all at the full sample rate - as determined by DecimationOpts
                 grid = build_horizon_grid(n_preview, opts.DecimationOpts);
                 v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid);
+                solve_info.PreviewGrid = grid;
             end
         end
         solve_info.TimeToComputeFeedforward = toc(clock_start);
@@ -129,7 +133,8 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
             end
         else
             grid = build_horizon_grid(n_preview, opts.DecimationOpts);
-            [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, grid);
+            [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, grid, opts.UseHeldXAssumption);
+            solve_info.PreviewGrid = grid;
         end
 
         % --- 2.2.3: Control input ---
@@ -242,7 +247,7 @@ function v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid)
     end
 end
 
-function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, grid)
+function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, grid, useHeldX)
 % Decimated Riccati recursion (cost-to-go and costate)
 
     Q = C'*Qy*C;
@@ -257,24 +262,44 @@ function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, g
     Qy_d = cell(1, n_tiers);
     Q_d  = cell(1, n_tiers);
     R_d  = cell(1, n_tiers);
+    N_d  = cell(1, n_tiers);
+    G_d  = cell(1, n_tiers);
+    H_d  = cell(1, n_tiers);
     A_p  = eye(12);
     B_p  = zeros(12, 6);
     p    = 0;
+    Q_sum = zeros(12); N_sum = zeros(12, 6); S_sum = zeros(6); G_sum = zeros(12); H_sum = zeros(12, 6);
     for i = 1:n_tiers
         if df_(i) == 1
             A_d{i} = A; B_d{i} = B; Qy_d{i} = Qy; Q_d{i} = Q; R_d{i} = R;
+            N_d{i} = zeros(12, 6); G_d{i} = eye(12); H_d{i} = zeros(12, 6);
         else
             % Step up the powers to the current decimation factor
             while p < df_(i)
+                if ~useHeldX
+                    Q_sum = Q_sum + A_p'*Q*A_p;
+                    N_sum = N_sum + A_p'*Q*B_p;
+                    S_sum = S_sum + B_p'*Q*B_p;
+                    G_sum = G_sum + A_p;
+                    H_sum = H_sum + B_p;
+                end
                 B_p = A * B_p + B;
                 A_p = A * A_p;
                 p   = p + 1;
             end
             A_d{i}  = A_p;
             B_d{i}  = B_p;
-            Qy_d{i} = df_(i) * Qy;
-            Q_d{i}  = df_(i) * Q;
-            R_d{i}  = df_(i) * R;
+            if useHeldX
+                Qy_d{i} = df_(i) * Qy;
+                Q_d{i}  = df_(i) * Q;
+                R_d{i}  = df_(i) * R;
+            else
+                Q_d{i} = Q_sum;
+                N_d{i} = N_sum;
+                R_d{i} = df_(i) * R + S_sum;
+                G_d{i} = G_sum;
+                H_d{i} = H_sum;
+            end
         end
     end
 
@@ -284,10 +309,17 @@ function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, g
         for b = grid.n_blocks(i):-1:1
             j_blk = grid.tier_start(i) + (b-1)*d;
             r_bar = sum(r_(:, k+j_blk : k+j_blk+d-1), 2) / d;
-            K_d   = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i});
-            A_cl  = A_d{i} - B_d{i}*K_d;
-            P     = Q_d{i} + K_d'*R_d{i}*K_d + A_cl'*P*A_cl;
-            v_k1  = A_cl'*v_k1 + C'*Qy_d{i}*r_bar;
+            if useHeldX
+                K_d   = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i});
+                A_cl  = A_d{i} - B_d{i}*K_d;
+                P     = Q_d{i} + K_d'*R_d{i}*K_d + A_cl'*P*A_cl;
+                v_k1  = A_cl'*v_k1 + C'*Qy_d{i}*r_bar;
+            else
+                K_d   = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i} + N_d{i}');
+                A_cl  = A_d{i} - B_d{i}*K_d;
+                P     = Q_d{i} + K_d'*R_d{i}*K_d - N_d{i}*K_d - K_d'*N_d{i}' + A_cl'*P*A_cl;
+                v_k1  = A_cl'*v_k1 + (G_d{i} - H_d{i}*K_d)'*C'*Qy*r_bar;
+            end
         end
     end
 

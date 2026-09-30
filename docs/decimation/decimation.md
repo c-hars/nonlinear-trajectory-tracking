@@ -12,7 +12,7 @@ Consider kHz-rate control of the hexacopter. Computing and applying the feedback
 
 "Decimation" of the reference preview is the solution to this. At each control step, update and apply the gain $K$ for feedback, but compute the reference preview $K_v v_{k+1}$ over a *decimated grid*; group multiple fine steps into coarser "blocks", and compute the recursion over these. Effectively: feedback that scales with loop rate, preview that doesn't – the benefits of high loop rate feedback control without the largely-redundant overhead.
 
-A similar decimation scheme applies to the shrinking horizon / MPC mode, where the full Riccati recursion is needed (the time-varying cost-to-go/gain, as well as the costate).
+A similar decimation scheme applies to the shrinking horizon / MPC mode, where the full Riccati recursion is needed (which includes the time-varying cost-to-go/gain, as well as the costate).
 
 ## Glossary: "decimated recursions" and multi-rate MPC
 
@@ -521,6 +521,8 @@ In the implementation, the coarse gains are never applied: they only propagate $
 
 where $x_i = A_i x + B_i u$. Under held-$x$, the stage cost counts the block-start state $d$ times (hence $dQ$, $dR$, $d\bar{q}$) rather than following the state through the block, i.e. a left-rectangle approximation of the total block cost.
 
-**Why this is reasonable.** The $d$-step dynamics are untouched, so only the cost within each block is approximated. This error scales with how far the state moves within a block – which is small for typical $d$, and located in the far-horizon, where the prediction is least accurate, and fidelity matters least. In testing, the exact version added complexity without improving performance.
+**Why this is reasonable.** The $d$-step dynamics are untouched, so only the cost within each block is approximated. This error scales with how far the state moves within a block, which is small for typical $d$, and located in the far-horizon, where the prediction is least accurate and fidelity matters least. In testing, the exact version added complexity without improving performance, though it introduces another approximation relative to the undecimated recursion – held-x, as well as held-u.
 
-**Parallel with a $d T_s$ discretisation.** Held-$x$ makes each block exactly *what a system sampled at* $d T_s$ *sees*: the ZOH transition $(A_d, B_d)$, with the state and input cost applied only at the block boundaries. Each coarse step is therefore exactly the Riccati step of the $d T_s$ system with scaled costs, $(A_d, B_d, dQ, dR)$; $K_d$ is that system's gain, and the scaling only changes the size of $P$, keeping it in the same units as the fine steps it's combined with. It replaces $d$ fine steps with one evaluation – but retaining $P$ in fine-rate units, so that coarse and fine steps can be mixed freely throughout the recursion.
+**Parallel with a $d T_s$ discretisation.** Held-$x$ makes each block exactly *what a system sampled at* $d T_s$ *sees*: the exact ZOH transition $(A_d, B_d)$, just with the state and input cost applied at the block boundaries. Each coarse step is therefore exactly the Riccati step of the system at sample rate `d*T_s`, i.e. $(A_d, B_d, dQ, dR)$; $K_d$ is that system's gain and $P=P_d$ is its cost-to-go.
+
+Also note that since $P$ accumulates the cost-to-go for $d$ fine steps, $P$ remains representative of the cost-to-go for fine steps throughout the recursion, i.e. coarse and fine steps can be mixed freely throughout the recursion, under the same update formulas.

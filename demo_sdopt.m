@@ -144,13 +144,13 @@ end
 
 %% SDOPT w/ high loop rates
 
-qp.Ts = 1/400;
-maneuver_time = 4.5;
+qp.Ts = 1/1000;
+maneuver_time = 5.0;
 SDCAttRep = 'Quaternion';
 
 % Decimation factors
-% > geometric progression, up to ~20Hz preview
-df = 2.^(0:1:floor(log2((1/20)/qp.Ts)));
+% df = 2.^(0:1:floor(log2((1/20)/qp.Ts)));  % geometric progression, up to ~20Hz preview
+df = 2.^[0, floor(log2((1/20)/qp.Ts))];  % straight progression: fine-rate then coarse-rate (no intermediate geometric progression)
 dopts = struct('DecimationFactors', df, 'StepsPerTier', df(end));
 
 % Problem setup
@@ -184,11 +184,13 @@ ctrl_fcn_3 = @(t,x,k,u_prev) compute_u_SDDRE_v3(t, xmap(x), k, u_prev, ...
     SDC_B_function = @(uk,qp) get_B_matrix_SDRE(uk,qp));
 
 thrust_fcn = @(t) ones(1,6);
-[~, ~, C_eul, Qy_eul, Qyf_eul] = get_weights(qp, 'Euler'); % Evaluate cost in Euler coordinates
-
-fprintf('\n--- SD-OPT decimated (with %s attitude) ---\n', SDCAttRep)
+[~, ~, C_nat, Qy_nat, Qyf_nat] = get_weights(qp, SDCAttRep); % Evaluate cost in Native coordinates
 
 ctrl_fcns = {ctrl_fcn_1, ctrl_fcn_2, ctrl_fcn_3};
+labels = {'SD-OPT (MPC at terminal)', 'SD-OPT (pure preview)', 'SD-MPC'};
+
+fprintf('\n--- SD-OPT decimated (with %s attitude) ---\n\n\n', SDCAttRep)
+c1_     = cell(1,3);
 t_      = cell(1,3);
 X_      = cell(1,3);
 U_      = cell(1,3);
@@ -198,13 +200,17 @@ Jy_     = cell(1,3);
 Ju_     = cell(1,3);
 Jy_i_   = cell(1,3);
 U_raw_  = cell(1,3);
-
-for i=3:3
+for i=1:3
     [t, X, U, c1, c2, stats, U_raw] = run_sim(qp, tspan, x0, thrust_fcn, ctrl_fcns{i}, AttitudeRepresentation=SimDataRep);
-    [J, Jy, Ju, Jy_i] = compute_J_LQT(t, X, U, Qy_eul, Qyf_eul, R, C_eul, ...
+    [J, Jy, Ju, Jy_i] = compute_J_LQT(t, X, U, Qy_nat, Qyf_nat, R, C_nat, ...
         x_ref_fcn, qp.Ts, AttitudeRepresentation=SimDataRep);
+        
+    % Store results
+    t_{i} = t; X_{i} = X; U_{i} = U;
+    c1_{i} = c1; stats_{i} = stats; U_raw_{i} = U_raw;
+    J_{i} = J; Jy_{i} = Jy; Ju_{i} = Ju; Jy_i_{i} = Jy_i;
 
-    fprintf('--- config %d ---\n', i)
+    fprintf('Config %d: %s \n', i, labels{i})
     fprintf('  Compute : %.2f s total → %.1f Hz equivalent\n', sum(c1), length(U)/sum(c1))
     fprintf('    running the simulation (rk4 or ode45) took up the other %.2f s\n', sum(c2))
     print_tracking_metrics(X, r_, J, Jy, Ju, Jy_i)
@@ -212,24 +218,123 @@ for i=3:3
     fprintf('\n\n')
 end
 
+
+%% Compute and tracking comparison across the three configs
+
+nr   = size(r_,2);
+cmap = colororder;
+
 figure(4); clf
-do_plots(t, X, U, r_, qp, SimDataRep)
-sgtitle(sprintf('SD-OPT (with %s attitude)', SDCAttRep))
 
-t1 = [stats.TimeToComputeDiscreteSDCMatrices];
-t2 = t1 + [stats.TimeToSolveDARE];
-t3 = t2 + [stats.TimeToComputeFeedforward];
+ax_p = gobjects(1,3);
+ax_u = gobjects(1,3);
+ax_c = gobjects(1,3);
+for i = 1:3
 
-dt1 = 1000*t1;
-dt2 = 1000*(t2-t1);
-dt3 = 1000*(t3-t2);
+    t = t_{i}(1:nr);
+    X = X_{i}(1:nr,:);
+    U = U_{i};
 
-subplot(3,1,2); cla reset
-area(t(1:end-1), [dt1(:) dt2(:) dt3(:)], 'EdgeColor', 'none')
-yline(qp.Ts * 1000, '--')
-ylim([-0.02 1]*qp.Ts*1.1 * 1000)
-ylabel("Compute [ms]")
-legend('sdc','dare','ff','Location','west')
+    % --- Left: position vs reference ---
+
+    ax_p(i) = subplot(3,3,3*i-2); hold on
+
+    plot(t,X(:,1))
+    plot(t,X(:,2))
+    plot(t,X(:,3))
+
+    plot(t,r_(1,:),'Color',cmap(1,:),'LineStyle','--')
+    plot(t,r_(2,:),'Color',cmap(2,:),'LineStyle','--')
+    plot(t,r_(3,:),'Color',cmap(3,:),'LineStyle','--')
+
+    grid on
+    yline(0,'Color',[1 1 1]*0.25)
+    ylabel('Position [m]')
+    legend('x','y','z')
+    title(labels{i})
+
+    % --- Middle: actuator inputs ---
+
+    ax_u(i) = subplot(3,3,3*i-1); hold on
+
+    % Actuator limits + nominal
+    yline(qp.max_du,'Color',[1 1 1]*0.5)
+    yline(0,'Color',[1 1 1]*0.67)
+    yline(-qp.nominal_omegas,'Color',[1 1 1]*0.5)
+
+    plot(t(1:end-1), U(1:nr-1,:)) % control input
+
+    grid on
+    ylabel('\delta U')
+
+    % --- Right: compute breakdown ---
+
+    t1 = [stats_{i}.TimeToComputeDiscreteSDCMatrices];
+    t2 = t1 + [stats_{i}.TimeToSolveDARE];
+    t3 = t2 + [stats_{i}.TimeToComputeFeedforward];
+
+    dt1 = 1000*t1;
+    dt2 = 1000*(t2-t1);
+    dt3 = 1000*(t3-t2);
+
+    ax_c(i) = subplot(3,3,3*i);
+    area(t_{i}(1:end-1), [dt1(:) dt2(:) dt3(:)], 'EdgeColor', 'none')
+    yline(qp.Ts * 1000, '--')
+    ylabel("Compute [ms]")
+    legend('sdc','dare','ff','Location','west')
+end
+
+links = [linkprop([ax_p ax_u ax_c], 'XLim'), ...
+         linkprop(ax_p, 'YLim'), ...
+         linkprop(ax_u, 'YLim'), ...
+         linkprop(ax_c, 'YLim')];
+setappdata(gcf, 'axis_links', links)  % links stay active only while referenced
+
+xlim(ax_p(1), [0 maneuver_time])
+ylim(ax_p(1), [-1 1]*1.1*max(abs(r_),[],'all'))
+ylim(ax_u(1), [-1 1]*400)
+ylim(ax_c(1), [-0.02 1]*qp.Ts*1.1 * 1000)
+
+xlabel(ax_p(3), 'Time [s]')
+xlabel(ax_u(3), 'Time [s]')
+xlabel(ax_c(3), 'Time [s]')
+
+
+%% Decimation comparison: SD-OPT (pure preview) and SD-MPC, with and without decimation
+
+% Compares undecimated vs decimated: SD-OPT and SD-MPC. Print-only output.
+% 
+% NB: this section will take 1-2mins to run, as the undecimated MPC recursion at 1000Hz is very slow - expect it to take 1-2mins total
+
+dec_labels = {'SD-OPT (pure preview), undecimated', 'SD-OPT (pure preview), decimated', 'SD-MPC, undecimated', 'SD-MPC, decimated'};
+dec_opts   = {[], dopts, [], dopts};
+full_mpc   = [false false true true];
+
+N = length(r_);
+
+fprintf('\n--- Decimation comparison (%g Hz, %.1fs preview, %s attitude) ---\n', 1/qp.Ts, SDOPTPreviewHorizon, SDCAttRep)
+fprintf('  %-34s %8s %10s %8s %14s %10s %8s\n', 'Config', 'J', 'RMSE', '||u||', 'Total compute', 'Per-step', 'Budget')
+for i = 1:4
+    fprintf('  %-34s ', dec_labels{i});  % label first, so the user sees what's running
+    ctrl_fcn = @(t,x,k,u_prev) compute_u_SDDRE_v3(t, xmap(x), k, u_prev, ...
+        r_, C, Qy, R, Qyf, qp, PreviewHorizon = SDOPTPreviewHorizon, DecimationOpts = dec_opts{i}, ...
+        AlwaysUseFullFiniteHorizonMPC = full_mpc(i), ...
+        UseFullFiniteHorizonMPCAtTerminal = false, ...
+        SDC_A_function = A_fcn, ...
+        SDC_B_function = @(uk,qp) get_B_matrix_SDRE(uk,qp));
+
+    [t, X, U, c1] = run_sim(qp, tspan, x0, thrust_fcn, ctrl_fcn, AttitudeRepresentation=SimDataRep);
+    J = compute_J_LQT(t, X, U, Qy_nat, Qyf_nat, R, C_nat, ...
+        x_ref_fcn, qp.Ts, AttitudeRepresentation=SimDataRep);
+
+    e_pos = X(1:N, 1:3) - r_(1:3, 1:N)';
+    rmse  = 100 * sqrt(mean(e_pos.^2, 'all'));
+    u_rms = sqrt(mean(sum(U(1:N-1,:).^2, 2)));  % RMS over time of the input vector norm
+    ct    = c1(round(0.1/qp.Ts):end);  % discard noisy first samples
+
+    fprintf('%8.2f %10s %8.1f %14s %10s %7.1f%%\n', J, sprintf('%.2f cm', rmse), u_rms, ...
+        sprintf('%.2f s', sum(c1)), sprintf('%.3f ms', 1000*median(ct)), 100*median(ct)/qp.Ts)
+end
 
 
 %% ---- Local functions ----
