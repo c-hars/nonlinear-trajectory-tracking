@@ -15,7 +15,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
         opts.PreviewHorizon = 2.0 % this is all really designed for finite-horizon formulations, with the horizon large (>= 2.0 for our case) -- but inf is a safe choice, just get delayed tracking
         opts.UseFullFiniteHorizonMPCAtTerminal = true % best set to false if you need precisely consistent/predictable solve times - adds a bit of overhead to do the full recursion for K too
         opts.AlwaysUseFullFiniteHorizonMPC = false % set to true → regression to the standard MPC cost function being optimised / directly comparable OCP with LinMPC, NLMPC -- no longer optimal preview control that uses the infinite/finite horizon split (core part of the algorithm!)
-        opts.DecimationOpts = struct('DecimationFactors', [1], 'StepsPerTier', 1)
+        opts.DecimationOpts = []  % example: struct('DecimationFactors', [1], 'StepsPerTier', 1)
 
         opts.DARESolver (1,:) char {mustBeMember(opts.DARESolver, {'nk','riccati','cold','idare','dlqr','sda'})} = 'nk'
         opts.DARESolverOpts (1,1) struct = struct()
@@ -48,7 +48,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
     n_preview = round(opts.PreviewHorizon/qp.Ts);
 
     % One-time diagnostic: print the preview grid
-    if k == 1 && ~isinf(n_preview)
+    if k == 1 && ~isinf(n_preview) && ~isempty(opts.DecimationOpts)
         print_horizon_grid(build_horizon_grid(n_preview, opts.DecimationOpts), qp);
     end
 

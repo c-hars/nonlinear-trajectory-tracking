@@ -4,11 +4,11 @@ function [u, solve_info] = compute_u_SDOPT(t, x, k, u_prev, ...
         t; x; k; u_prev
         r_; C; Qy; R; Qyf; qp
         options.PreviewHorizon    = 2.0
-        options.SDC_A_function    = []
-        options.SDC_B_function    = []
+        options.SDC_A_function    = @get_A_matrix_SDRE_EulerAttitude
+        options.SDC_B_function    = @get_B_matrix_SDRE
         options.DARESolver        = 'nk'
         options.DARESolverOpts    = struct()
-        options.DecimationOpts    = struct()
+        options.DecimationOpts    = []
     end
 
     [u, solve_info] = compute_u_SDDRE_v3([], x, k, u_prev, ...
