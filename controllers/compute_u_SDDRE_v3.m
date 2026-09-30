@@ -147,8 +147,6 @@ end
 function print_horizon_grid(grid, qp)
 % One-time diagnostic: print the preview grid
 
-    if grid.use_fine_fallback, return, end
-
     n_fine_tier = grid.n_blocks .* grid.df_;
 
     fprintf('  Preview grid (%d steps/tier, %d remainder):\n', grid.n_steps_per_tier, grid.n_fine_rem);
@@ -172,22 +170,26 @@ function grid = build_horizon_grid(n_preview, DecimationOpts)
     grid.n_steps_per_tier  = n_steps_per_tier;
     grid.n_fine            = n_fine;
     grid.n_fine_near       = n_fine_near;
-    grid.use_fine_fallback = (n_fine_near >= n_fine);  % tiers alone fill the horizon
 
-    if grid.use_fine_fallback
-        return
+    % Fill tiers: fine-to-coarse
+    % > Truncated to best fit. If DecimationOpts specifies a preview grid layout that is too short: the grid shrinks, one block at a time; the specified structure is maintained, but truncated as necessary (until eventually only fine steps remain).
+    % > Otherwise (the usual case): every near tier gets its full StepsPerTier blocks, the far tier takes as many whole blocks as fit in the rest, and the leftover becomes the fine remainder.
+    budget   = n_fine;
+    n_blocks = zeros(1, n_tiers);
+    for i = 1:n_tiers-1
+        n_blocks(i) = min(n_steps_per_tier, floor(budget / df_(i)));
+        budget = budget - n_blocks(i) * df_(i);
     end
-
-    n_fine_far   = n_fine - n_fine_near;
-    n_coarse_far = floor(n_fine_far / df_(end));
-    n_fine_rem   = n_fine_far - n_coarse_far * df_(end);
-    grid.n_blocks = [repmat(n_steps_per_tier, 1, n_tiers-1), n_coarse_far];  % coarse steps per tier
+    n_blocks(n_tiers) = floor(budget / df_(end));
+    n_coarse_far = n_blocks(n_tiers);
+    n_fine_rem   = budget - n_coarse_far * df_(end);
+    grid.n_blocks = n_blocks;  % blocks per tier
 
     tier_start = zeros(1, n_tiers);
     cursor = n_fine_rem + 1;
     for i = 1:n_tiers-1
         tier_start(i) = cursor;
-        cursor = cursor + n_steps_per_tier * df_(i);
+        cursor = cursor + n_blocks(i) * df_(i);
     end
     tier_start(n_tiers) = cursor;  % far-horizon tier starts here
 
@@ -200,14 +202,6 @@ function v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid)
 % Decimated Riccati recursion (costate only - under preview control the cost-to-go and gain are fixed via P=P_ss, K=K_ss)
 
     v_k1 = (eye(12) - F) \ C'*Qy*r_(:, k+n_preview);  % SDOPT seed
-
-    if grid.use_fine_fallback
-        % Fall back to fine recursion
-        for j = grid.n_fine:-1:1
-            v_k1 = F*v_k1 + C'*Qy*r_(:, k+j);
-        end
-        return
-    end
 
     df_ = grid.df_;
     n_tiers = grid.n_tiers;
@@ -252,18 +246,7 @@ function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, g
 % Decimated Riccati recursion (cost-to-go and costate)
 
     Q = C'*Qy*C;
-
-    if grid.use_fine_fallback
-        % Tiers alone fill the horizon - fall back to fine recursion
-        for j = grid.n_fine:-1:1
-            K    = (R + B'*P*B) \ (B'*P*A);
-            A_cl = A - B*K;
-            P    = Q + K'*R*K + A_cl'*P*A_cl;
-            v_k1 = A_cl'*v_k1 + C'*Qy*r_(:, k+j);
-        end
-        return
-    end
-
+    
     df_ = grid.df_;
     n_tiers = grid.n_tiers;
 
