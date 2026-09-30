@@ -102,7 +102,12 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
                         error('iterative_dare: unsupported DlyapSolver "%s".', func2str(opts.DlyapSolver));
                 end
 
-                P  = (P + P') / 2; % small asymmetry can accumulate due to numerical rounding
+                if i == 1 && ~sinfo.IsStable
+                    
+                    info.UnstableK0 = true;
+                    break;
+                end
+                P  = (P + P') / 2;
 
                 if opts.EarlyBreakEnabled && (i >= opts.MinItersNK)
                     if compute_dare_residual(A,B,Q,R,P) < opts.Tolerance
@@ -116,13 +121,14 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
     end
 
     P_ss = P;
-    if strcmpi(opts.Method,'nk') && strcmpi(func2str(opts.DlyapSolver),'dlyap_sda')
+    if strcmpi(opts.Method,'nk') && strcmpi(opts.DlyapSolver,'dlyap_sda')
             info.SolverIterations = n_sda_iters;
     else
         info.SolverIterations = i;
     end
     info.TolAchieved = compute_dare_residual(A,B,Q,R,P);
     info.SolveSuccess = (info.TolAchieved < opts.Tolerance);
+
 
 
 end

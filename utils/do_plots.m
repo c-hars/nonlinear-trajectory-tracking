@@ -2,6 +2,14 @@
 
 function do_plots(t, X, U, r_, qp, AttRep)
 
+if nargin < 6
+    switch size(X,2)
+        case 12, AttRep = 'Euler'; % Assumed. But 12 state data could also be MRP or FRA.
+        case 13, AttRep = 'Quaternion ';
+        otherwise, error("Expected size(X,2) == 12 or 13");
+    end
+end
+
 nr = size(r_,2);
 t = t(1:nr);
 X = X(1:nr,:);
@@ -40,6 +48,7 @@ plot(t, Xe(:,9)*180/pi)
 grid on
 yline(0,'Color',[1 1 1]*0.25,'HandleVisibility','off')
 ylabel('Euler angles [deg]')
+% legend
 legend('\phi','\theta','\psi')
 
 xlim([0 t(end)])

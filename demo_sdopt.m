@@ -8,59 +8,73 @@ load_copter_params
 % Main parameters to experiment with are here.
 % Other parameters can also be changed - e.g. modify the trajectory at ("utils/load_fig_8.m") and cost matrices at ("plant/get_weights.m").
 
-qp.Ts = 1/20;  % sample rate. NB: qp stands for "quadcopter parameters" (the plant was originally a quadcopter).
+qp.Ts = 1/20;         % sample rate. NB: qp stands for "quadcopter parameters" (the plant was originally a quadcopter:))
 maneuver_time = 10.0;  % time the maneuever needs to be completed in [seconds]
 
-SDCAttRep = 'FRA'; % for SDOPT. Choose from: Euler, Quaternion, MRP, FRA.
+% for SDOPT. Choose from: Euler, Quaternion, MRP, FRA.
+SDCAttRep = 'Euler';
+SDCAttRep = 'MRP';
+SDCAttRep = 'FRA';
+SDCAttRep = 'Quaternion';
 SDOPTPreviewHorizon = 2.0; % [seconds]
-
 
 %% Linear control (Linear Quadratic Tracking)
 
-Ac      = get_A_matrix();
-Bc      = get_B_matrix(qp);
-[Ad,Bd] = c2d_zoh_expm(Ac, Bc, qp.Ts);
-[Q, R, C, Qy, Qyf, ~, sel] = get_weights(qp, 'Euler');
-[r_,x_ref_fcn,~,tspan,x0]  = load_fig8_traj(qp, C, ...
-    t_maneuver=maneuver_time, AttitudeRepresentation='Euler');
+% Ac      = get_A_matrix();
+% Bc      = get_B_matrix(qp);
+% [Ad,Bd] = c2d_zoh_expm(Ac, Bc, qp.Ts);
+% [Q, R, C, Qy, Qyf, ~, sel] = get_weights(qp, 'Euler');
+% [r_,x_ref_fcn,~,tspan,x0]  = load_fig8_traj(qp, C, ...
+%     t_maneuver=maneuver_time, AttitudeRepresentation='Euler');
 
-t_start = tic;
-[K_, xref_, ff_] = solve_LQT(r_, length(r_), Ad, Bd, C, Qy, Qyf, R);
-lqt_precompute = toc(t_start);
+% t_start = tic;
+% [K_, xref_, ff_] = solve_LQT(r_, length(r_), Ad, Bd, C, Qy, Qyf, R);
+% lqt_precompute = toc(t_start);
 
-ctrl_fcn   = @(t,x,k) deal( ...
-    K_(:,:,k) * (x - xref_(:,k)) + ff_(:,k), ...
-    struct('ExitFlag', 1));
-thrust_fcn = @(t) ones(1,6);
+% ctrl_fcn   = @(t,x,k) deal( ...
+%     K_(:,:,k) * (x - xref_(:,k)) + ff_(:,k), ...
+%     struct('ExitFlag', 1));
+% thrust_fcn = @(t) ones(1,6);
 
-[t, X, U, c1] = run_sim(qp, tspan, x0, thrust_fcn, ctrl_fcn, ...
-    AttitudeRepresentation='Euler');
+% [t, X, U, c1] = run_sim(qp, tspan, x0, thrust_fcn, ctrl_fcn, ...
+%     AttitudeRepresentation='Euler');
 
-[J, Jy, Ju, Jy_i] = compute_J_LQT(t, X, U, Qy, Qyf, R, C, x_ref_fcn, qp.Ts, ...
-    AttitudeRepresentation='Euler');
+% [J, Jy, Ju, Jy_i] = compute_J_LQT_v3(t, X, U, Qy, Qyf, R, C, x_ref_fcn, qp.Ts, ...
+%     AttitudeRepresentation='Euler');
 
-fprintf('\n--- LQT ---\n')
-fprintf('  Compute : %.2f s (precompute) + %.2f s (sim overhead)\n', lqt_precompute, sum(c1))
-print_tracking_metrics(X, r_, J, Jy, Ju, Jy_i)
+% fprintf('\n--- LQT ---\n')
+% fprintf('  Compute : %.2f s (precompute) + %.2f s (sim overhead)\n', lqt_precompute, sum(c1))
+% print_tracking_metrics(X, r_, J, Jy, Ju, Jy_i)
 
-figure(1); clf
-do_plots(t, X, U, r_, qp, 'Euler')
-sgtitle('LQT')
+% figure(1); clf
+% do_plots(t, X, U, r_, qp, 'Euler')
+% sgtitle('LQT')
 
 
 %% Nonlinear control (SD-OPT, "State Dependent Optimal Preview Tracking")
 
-% Regardless of the controller, the plant always uses quaternion dynamics under the hood.
-% xq2sdc maps the 13-state quaternion plant to controller-native coordinates.
-% get_weights() recomputes Qy, Qyf to ensure cost-function equivalence across attitude representations (and sample rates).
+SimUsesNativeRep = false;
+% Regardless of the controller, the plant always uses quaternion dynamics under the hood
+% xq2sdc maps the 13-state quaternion plant to controller-native coordinates
+% get_weights() recomputes Qy, Qyf to ensure cost-function equivalence across attitude representations (and sample rates)
+% ... but you can also set SimUsesNativeRep = true, to run the sim in controller-native coordinates. Results should match to numerical precision - good verification of the nonlinear dynamics branches as well as the coordinate conversion functions.
 
 
-SimDataRep = 'Quaternion';
-xmap = xq2sdc(SDCAttRep);
+if SimUsesNativeRep && ~strcmpi(SDCAttRep, "Quaternion")
+    % No conversions needed - except for the quaternion-native sim (quat -> quat_vec conversion is always necessary for the quaternion SDC controller, which uses a 3-parameter reduction of the quaternion (the vector part))
+    xmap = @(x) x;
+    SimDataRep = SDCAttRep;
+else
+    % Convert 4 element quaternion to 3 element attrep expected by controller (MRP vector / FRA vector / Euler angles)
+    xmap = xq2sdc(SDCAttRep);
+    SimDataRep = "Quaternion";
+end
 
 [Q, R, C, Qy, Qyf, ~, sel] = get_weights(qp, SDCAttRep);
 [r_, x_ref_fcn, tgrid, tspan, x0] = load_fig8_traj(qp, C, ...
     t_maneuver=maneuver_time, AttitudeRepresentation=SimDataRep);
+% [r_, x_ref_fcn, tgrid, tspan, x0] = load_circ_traj(qp, C, ...
+    % t_maneuver=maneuver_time, AttitudeRepresentation=SimDataRep);
 
 A_fcn = get_SDC_A_function(SDCAttRep);
 
@@ -68,6 +82,7 @@ A_fcn = get_SDC_A_function(SDCAttRep);
 ctrl_fcn = @(t,x,k,u_prev) compute_u_SDOPT(t, xmap(x), k, u_prev, ...
     r_, C, Qy, R, Qyf, qp, ...
     PreviewHorizon = SDOPTPreviewHorizon, ...
+    DecimationFactor = max(1, round(0.01/qp.Ts)), ...
     SDC_A_function = A_fcn, ...
     SDC_B_function = @(uk,qp) get_B_matrix_SDRE(uk,qp));
 
@@ -85,6 +100,16 @@ fprintf('  Compute : %.2f s total → %.1f Hz equivalent\n', sum(c1), length(U)/
 fprintf('    running the simulation (rk4 or ode45) took up the other %.2f s\n', sum(c2))
 print_tracking_metrics(X, r_, J, Jy, Ju, Jy_i)
 print_saturation(U_raw, qp)
+
+fprintf("TimeToComputeDiscreteSDCMatrices: %5.2f s\n", ...
+    sum([stats.TimeToComputeDiscreteSDCMatrices]))
+ttsd = [stats.TimeToSolveDARE];
+fprintf("                 TimeToSolveDARE: %5.2f s", ...
+    sum([stats.TimeToSolveDARE]))
+fprintf("     (%.1f / %.1f us per call (median/p95))\n", ...
+    1e6*median(ttsd), 1e6*prctile(ttsd(round(0.1/qp.Ts):end),95)) % discard noisy first samples for p95
+fprintf("        TimeToComputeFeedforward: %5.2f s\n", ...
+    sum([stats.TimeToComputeFeedforward]))
 
 figure(2); clf
 do_plots(t, X, U, r_, qp, SimDataRep)
@@ -111,35 +136,36 @@ sgtitle(sprintf('SD-OPT (with %s attitude)', SDCAttRep))
 
 %% Compare with precomputed NLMPC (too slow to recompute live)
 
-nlmpc_file = sprintf('data/nlmpc_fra_cold_con_Ts%gHz_tman%s_H%g.mat', 1/qp.Ts, ...
-    strrep(num2str(maneuver_time), '.', 'p'), SDOPTPreviewHorizon);
+% nlmpc_file = sprintf('data/nlmpc_fra_cold_con_Ts%gHz_tman%s_H%g.mat', 1/qp.Ts, ...
+%     strrep(num2str(maneuver_time), '.', 'p'), SDOPTPreviewHorizon);
 
-if isfile(nlmpc_file)
-    nlmpc_data = load(nlmpc_file);
-    SimDataRep = 'Quaternion';
+% % if qp.Ts ~= 1/20 || SDOPTPreviewHorizon ~= 2.0
+% %     fprintf('\n--- NLMPC: precomputed results are at 20 Hz with Horizon 2.0s, current Ts is 1/%g Hz and Horizon %gs. Skipping ---\n', 1/qp.Ts, SDOPTPreviewHorizon)
+% if isfile(nlmpc_file)
+%     nlmpc_data = load(nlmpc_file);
 
-    [~, ~, C_eul, Qy_eul, Qyf_eul] = get_weights(qp, 'Euler');
-    [J, Jy, Ju, Jy_i] = compute_J_LQT(nlmpc_data.t, nlmpc_data.X, nlmpc_data.U, ...
-        Qy_eul, Qyf_eul, R, C_eul, x_ref_fcn, qp.Ts, ...
-        AttitudeRepresentation=SimDataRep);
-    fprintf('\n--- NLMPC (default Q/R matrices, FRA attitude, cold start, actuator constraints) ---\n')
-    fprintf('  Compute : %.2f s (total), %.2f s (first iter) + %.2fs/%.2fs/%.2fs/%.2fs (iter-wise mean/median/min/max thereafter)\n', ...
-        sum(nlmpc_data.compute_time_ctrl(1:end)), ...
-        nlmpc_data.compute_time_ctrl(1), ...
-        mean(nlmpc_data.compute_time_ctrl(2:end)), ...
-        median(nlmpc_data.compute_time_ctrl(2:end)), ...
-        min(nlmpc_data.compute_time_ctrl(2:end)), ...
-        max(nlmpc_data.compute_time_ctrl(2:end)))
-    print_tracking_metrics(nlmpc_data.X, r_, J, Jy, Ju, Jy_i)
-    print_saturation(nlmpc_data.U, qp, 0.005)
+%     [~, ~, C_eul, Qy_eul, Qyf_eul] = get_weights(qp, 'Euler');
+%     [J, Jy, Ju, Jy_i] = compute_J_LQT_v3(nlmpc_data.t, nlmpc_data.X, nlmpc_data.U, ...
+%         Qy_eul, Qyf_eul, R, C_eul, x_ref_fcn, qp.Ts, ...
+%         AttitudeRepresentation='Quaternion');
+%     fprintf('\n--- NLMPC (default Q/R matrices, FRA attitude, cold start, actuator constraints) ---\n')
+%     fprintf('  Compute : %.2f s (total), %.2f s (first iter) + %.2fs/%.2fs/%.2fs/%.2fs (iter-wise mean/median/min/max thereafter)\n', ...
+%         sum(nlmpc_data.compute_time_ctrl(1:end)), ...
+%         nlmpc_data.compute_time_ctrl(1), ...
+%         mean(nlmpc_data.compute_time_ctrl(2:end)), ...
+%         median(nlmpc_data.compute_time_ctrl(2:end)), ...
+%         min(nlmpc_data.compute_time_ctrl(2:end)), ...
+%         max(nlmpc_data.compute_time_ctrl(2:end)))
+%     print_tracking_metrics(nlmpc_data.X, r_, J, Jy, Ju, Jy_i)
+%     print_saturation(nlmpc_data.U, qp, 0.005)
 
-    figure(3); clf
-    do_plots(nlmpc_data.t, nlmpc_data.X, nlmpc_data.U, r_, qp, SimDataRep)
-    sgtitle(sprintf('NLMPC (with FRA attitude)'))
-else
-    fprintf('\n--- NLMPC: no precomputed result for Ts=%gHz, Horizon=%gs, t_man=%.2f s ---\n', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)
-    figure(3); clf % clear any old/invalid plot
-end
+%     figure(3); clf
+%     do_plots(nlmpc_data.t, nlmpc_data.X, nlmpc_data.U, r_, qp)
+%     sgtitle(sprintf('NLMPC (with FRA attitude)'))
+% else
+%     fprintf('\n--- NLMPC: no precomputed result for Ts=%gHz, Horizon=%gs, t_man=%.2f s ---\n', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)
+%     % figure(3); clf
+% end
 
 
 %% ---- Local functions ----
@@ -153,11 +179,11 @@ function print_tracking_metrics(X, r_, J, Jy, Ju, Jy_i)
     Jy_pos = sum(Jy_i(1:3));
 
     fprintf('  Cost    : %.2f  (tracking: %.2f, input: %.2f)\n', J, Jy, Ju)
-    fprintf('    of which position (xyz): %.2f  (%.0f%% of tracking cost, %.0f%% overall)\n', Jy_pos, 100*Jy_pos/Jy, 100*Jy_pos/J)
+    % fprintf('    of which position (xyz): %.2f  (%.0f%% of tracking cost, %.0f%% overall)\n', Jy_pos, 100*Jy_pos/Jy, 100*Jy_pos/J)
     % fprintf('    per-state contributions to tracking cost: [ %.0f, %.0f, %.0f, %.0f, %.0f, %.0f ] %% for states [ x, y, z, omega_3, omega_1_dot, omega_2_dot ]\n', 100*Jy_i/sum(Jy_i))
     fprintf('  RMSE    : %.2f cm\n', rmse)
     fprintf('  Terminal: %.2f cm\n', e_term)
-end
+end  % no need to compute_dare_residual() again
 
 function print_saturation(U_raw, qp, tol)
     if nargin < 3, tol = 0; end
