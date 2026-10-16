@@ -45,7 +45,8 @@ print_tracking_metrics(X, r_, J, Jy, Ju, Jy_i)
 
 figure(1); clf
 do_plots(t, X, U, r_, qp, 'Euler')
-sgtitle('LQT')
+sgtitle({'LQT (with Euler attitude)', ...
+    sprintf('\\fontsize{10}%g Hz, %.1f s preview · %gs manouevre', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
 
 
 %% Nonlinear control (SD-OPT, "State Dependent Optimal Preview Tracking")
@@ -88,7 +89,8 @@ print_saturation(U_raw, qp)
 
 figure(2); clf
 do_plots(t, X, U, r_, qp, SimDataRep)
-sgtitle(sprintf('SD-OPT (with %s attitude)', SDCAttRep))
+sgtitle({sprintf('SD-OPT (with %s attitude)', SDCAttRep), ...
+    sprintf('\\fontsize{10}%g Hz, %.1f s preview · %gs manouevre', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
 
 
 %% Alternative: 3D trajectory plot - show the reference path versus and what was actually tracked.
@@ -111,8 +113,10 @@ sgtitle(sprintf('SD-OPT (with %s attitude)', SDCAttRep))
 
 %% Compare with precomputed NLMPC (too slow to recompute live)
 
-nlmpc_file = sprintf('data/nlmpc_fra_cold_con_Ts%gHz_tman%s_H%g.mat', 1/qp.Ts, ...
+nlmpc_fname = sprintf('nlmpc_fra_cold_con_Ts%gHz_tman%s_H%g.mat', 1/qp.Ts, ...
     strrep(num2str(maneuver_time), '.', 'p'), SDOPTPreviewHorizon);
+root = fileparts(mfilename('fullpath'));
+nlmpc_file = fullfile(root,'data',nlmpc_fname);
 
 if isfile(nlmpc_file)
     nlmpc_data = load(nlmpc_file);
@@ -135,25 +139,22 @@ if isfile(nlmpc_file)
 
     figure(3); clf
     do_plots(nlmpc_data.t, nlmpc_data.X, nlmpc_data.U, r_, qp, SimDataRep)
-    sgtitle(sprintf('NLMPC (with FRA attitude)'))
+    sgtitle({sprintf('NLMPC (with FRA attitude)'), ...
+        sprintf('\\fontsize{10}%g Hz, %.1f s preview · %gs manouevre', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
 else
-    fprintf('\n--- NLMPC: no precomputed result for Ts=%gHz, Horizon=%gs, t_man=%.2f s ---\n', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)
+    fprintf('\n--- NLMPC: found no precomputed result for AttRep=FRA, Ts=%gHz, Horizon=%gs, t_man=%.2f s ---\n', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)
     figure(3); clf % clear any old/invalid plot
 end
 
 
 %% SDOPT w/ high loop rates
 
+% --- Problem setup ---
+
 qp.Ts = 1/1000;
 maneuver_time = 5.0;
-SDCAttRep = 'Quaternion';
+SDCAttRep = 'FRA';
 
-% Decimation factors
-% df = 2.^(0:1:floor(log2((1/20)/qp.Ts)));  % geometric progression, up to ~20Hz preview
-df = 2.^[0, floor(log2((1/20)/qp.Ts))];  % straight progression: fine-rate then coarse-rate (no intermediate geometric progression)
-dopts = struct('DecimationFactors', df, 'StepsPerTier', df(end));
-
-% Problem setup
 xmap = xq2sdc(SDCAttRep);
 A_fcn = get_SDC_A_function(SDCAttRep);
 [Q, R, C, Qy, Qyf, ~, sel] = get_weights(qp, SDCAttRep);
@@ -163,7 +164,19 @@ A_fcn = get_SDC_A_function(SDCAttRep);
 % Three controllers:
 %  (1) SD-OPT w/ shrinking horizon MPC at the terminal condition (used by default).
 %  (2) SD-OPT w/ pure preview tracking - the typical online case.
-%  (3) SD-MPC - full state-dependent MPC: full recursion over the costate and cost-to-go, at each timestep. The end of the window is treated via terminal cost Qyf, instead of the continued-to-be-held reference assumption ("SDOPT seed").
+%  (3) SD-MPC - state-dependent MPC: full recursion over the costate and cost-to-go, at each timestep. The end of the window is treated via terminal cost Qyf, instead of the continued-to-be-held reference assumption ("SDOPT seed").
+% 
+% Reference tracking and per-step compute is compared across these three configs.
+% 
+% Each controller runs at 1000Hz, with the recursion run over a decimated grid - configured below.
+% See /docs/decimation for more info.
+
+% --- Setup controllers ---
+
+% Decimation factors
+% df = 2.^(0:1:floor(log2((1/20)/qp.Ts)));  % geometric progression, up to ~20Hz preview
+df = 2.^[0, floor(log2((1/20)/qp.Ts))];  % two tiers: fine-rate then coarse-rate (no intermediate geometric progression)
+dopts = struct('DecimationFactors', df, 'StepsPerTier', df(end));
 
 ctrl_fcn_1 = @(t,x,k,u_prev) compute_u_SDOPT(t, xmap(x), k, u_prev, ...
     r_, C, Qy, R, Qyf, qp, PreviewHorizon = SDOPTPreviewHorizon, DecimationOpts = dopts, ...
@@ -182,6 +195,9 @@ ctrl_fcn_3 = @(t,x,k,u_prev) compute_u_SDDRE_v3(t, xmap(x), k, u_prev, ...
     AlwaysUseFullFiniteHorizonMPC = true, ...
     SDC_A_function = A_fcn, ...
     SDC_B_function = @(uk,qp) get_B_matrix_SDRE(uk,qp));
+
+
+% --- Closed-loop runs under each controller ---
 
 thrust_fcn = @(t) ones(1,6);
 [~, ~, C_nat, Qy_nat, Qyf_nat] = get_weights(qp, SDCAttRep); % Evaluate cost in Native coordinates
@@ -218,8 +234,7 @@ for i=1:3
     fprintf('\n\n')
 end
 
-
-%% Compute and tracking comparison across the three configs
+% --- Plots ---
 
 nr   = size(r_,2);
 cmap = colororder;
@@ -299,42 +314,8 @@ xlabel(ax_p(3), 'Time [s]')
 xlabel(ax_u(3), 'Time [s]')
 xlabel(ax_c(3), 'Time [s]')
 
-
-%% Decimation comparison: SD-OPT (pure preview) and SD-MPC, with and without decimation
-
-% Compares undecimated vs decimated: SD-OPT and SD-MPC. Print-only output.
-% 
-% NB: this section will take 1-2mins to run, as the undecimated MPC recursion at 1000Hz is very slow - expect it to take 1-2mins total
-
-dec_labels = {'SD-OPT (pure preview), undecimated', 'SD-OPT (pure preview), decimated', 'SD-MPC, undecimated', 'SD-MPC, decimated'};
-dec_opts   = {[], dopts, [], dopts};
-full_mpc   = [false false true true];
-
-N = length(r_);
-
-fprintf('\n--- Decimation comparison (%g Hz, %.1fs preview, %s attitude) ---\n', 1/qp.Ts, SDOPTPreviewHorizon, SDCAttRep)
-fprintf('  %-34s %8s %10s %8s %14s %10s %8s\n', 'Config', 'J', 'RMSE', '||u||', 'Total compute', 'Per-step', 'Budget')
-for i = 1:4
-    fprintf('  %-34s ', dec_labels{i});  % label first, so the user sees what's running
-    ctrl_fcn = @(t,x,k,u_prev) compute_u_SDDRE_v3(t, xmap(x), k, u_prev, ...
-        r_, C, Qy, R, Qyf, qp, PreviewHorizon = SDOPTPreviewHorizon, DecimationOpts = dec_opts{i}, ...
-        AlwaysUseFullFiniteHorizonMPC = full_mpc(i), ...
-        UseFullFiniteHorizonMPCAtTerminal = false, ...
-        SDC_A_function = A_fcn, ...
-        SDC_B_function = @(uk,qp) get_B_matrix_SDRE(uk,qp));
-
-    [t, X, U, c1] = run_sim(qp, tspan, x0, thrust_fcn, ctrl_fcn, AttitudeRepresentation=SimDataRep);
-    J = compute_J_LQT(t, X, U, Qy_nat, Qyf_nat, R, C_nat, ...
-        x_ref_fcn, qp.Ts, AttitudeRepresentation=SimDataRep);
-
-    e_pos = X(1:N, 1:3) - r_(1:3, 1:N)';
-    rmse  = 100 * sqrt(mean(e_pos.^2, 'all'));
-    u_rms = sqrt(mean(sum(U(1:N-1,:).^2, 2)));  % RMS over time of the input vector norm
-    ct    = c1(round(0.1/qp.Ts):end);  % discard noisy first samples
-
-    fprintf('%8.2f %10s %8.1f %14s %10s %7.1f%%\n', J, sprintf('%.2f cm', rmse), u_rms, ...
-        sprintf('%.2f s', sum(c1)), sprintf('%.3f ms', 1000*median(ct)), 100*median(ct)/qp.Ts)
-end
+sgtitle({sprintf('High loop rates w/ decimation')
+    sprintf('\\fontsize{10}%s attitude · %g Hz, %.1f s preview · %gs manouevre', SDCAttRep, 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
 
 
 %% ---- Local functions ----
@@ -365,14 +346,5 @@ function print_saturation(U_raw, qp, tol)
     else
         fprintf('  Saturation: %.1f%% of actuator samples, %.1f%% of timesteps\n', ...
             100*sum(sat,'all')/numel(sat), 100*sum(any(sat,2))/size(sat,1))
-    end
-end
-
-function A_fcn = get_SDC_A_function(rep)
-    switch lower(rep)
-        case 'euler',      A_fcn = @(xk,qp) get_A_matrix_SDRE_EulerAttitude(xk,qp);
-        case 'mrp',        A_fcn = @(xk,qp) get_A_matrix_SDRE_MRPAttitude(xk,qp);
-        case 'fra',        A_fcn = @(xk,qp) get_A_matrix_SDRE_FRAAttitude(xk,qp);
-        case 'quaternion', A_fcn = @(xk,qp) get_A_matrix_SDRE_QuaternionAttitude(xk,qp);
     end
 end

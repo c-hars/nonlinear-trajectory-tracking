@@ -16,7 +16,7 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
         opts.UseFullFiniteHorizonMPCAtTerminal = true % best set to false if you need precisely consistent/predictable solve times - adds a bit of overhead to do the full recursion for K too
         opts.AlwaysUseFullFiniteHorizonMPC = false % set to true → regression to the standard MPC cost function being optimised / directly comparable OCP with LinMPC, NLMPC -- no longer optimal preview control that uses the infinite/finite horizon split (core part of the algorithm!)
         opts.DecimationOpts = []  % example: struct('DecimationFactors', [1], 'StepsPerTier', 1)
-        opts.UseHeldXAssumption = true % false → exact block cost (cross term N_d, within-block costate terms). Only affects the decimated SD-MPC recursion
+        opts.UseHeldXAssumption = true % true → held-x assumption, false → exact block cost (cross term N_d, within-block costate terms). Only affects the decimated SD-MPC recursion
         opts.PrintPreviewGrid = false
 
         opts.DARESolver (1,:) char {mustBeMember(opts.DARESolver, {'nk','riccati','cold','idare','dlqr','sda'})} = 'nk'
