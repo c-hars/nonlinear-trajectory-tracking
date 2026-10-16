@@ -9,7 +9,7 @@ maxNumCompThreads(1);  % small matrices: multithreaded BLAS only adds timing jit
 %   Figure 1: per-step compute (median) vs loop rate, with the real-time threshold (1*Ts) visible.
 %   Figure 2: tracking cost vs loop rate - the delta J of each decimated config (relative to exact's J).
 % 
-% The reference is padded past its end, so neither controller shrinks its horizon i.e. median compute remains meaningful.
+% The reference is padded past its end so that median compute remains meaningful (neither controller shrinks its horizon).
 % 
 % SD-OPT (MPC at terminal) is left out: its per-step compute sits between the SD-OPT and SD-MPC curves (preview control, then shrinking-horizon MPC at the terminal), and with the padding it would never reach its terminal phase anyway - it would just repeat SD-OPT.
 % 

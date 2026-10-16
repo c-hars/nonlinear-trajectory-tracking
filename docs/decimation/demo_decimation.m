@@ -34,7 +34,7 @@ Config = 'SD-OPT (MPC at terminal)';
 %% Main parameters
 
 qp.Ts = 1/1000;            % sample rate
-maneuver_time = 5.0;       % [seconds] - non-saturating, so differences reflect the control law rather than clipping
+maneuver_time = 5.0;       % [seconds] - 5s is aggressive but non-saturating: differences reflect the control laws rather than clipping
 SDOPTPreviewHorizon = 2.0; % [seconds]
 SDCAttRep = 'Quaternion';  % Euler, Quaternion, MRP, FRA
 InputUnits = 'RPM';        % RPM, rad/s - inputs are plotted as the deviation from hover either way

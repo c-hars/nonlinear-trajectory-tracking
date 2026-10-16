@@ -46,7 +46,7 @@ print_tracking_metrics(X, r_, J, Jy, Ju, Jy_i)
 figure(1); clf
 do_plots(t, X, U, r_, qp, 'Euler')
 sgtitle({'LQT (with Euler attitude)', ...
-    sprintf('\\fontsize{10}%g Hz, %.1f s preview · %gs manouevre', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
+    sprintf('\\fontsize{10}%g Hz, %.1f s preview · %gs manoeuvre', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
 
 
 %% Nonlinear control (SD-OPT, "State Dependent Optimal Preview Tracking")
@@ -90,7 +90,7 @@ print_saturation(U_raw, qp)
 figure(2); clf
 do_plots(t, X, U, r_, qp, SimDataRep)
 sgtitle({sprintf('SD-OPT (with %s attitude)', SDCAttRep), ...
-    sprintf('\\fontsize{10}%g Hz, %.1f s preview · %gs manouevre', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
+    sprintf('\\fontsize{10}%g Hz, %.1f s preview · %gs manoeuvre', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
 
 
 %% Alternative: 3D trajectory plot - show the reference path versus and what was actually tracked.
@@ -140,182 +140,11 @@ if isfile(nlmpc_file)
     figure(3); clf
     do_plots(nlmpc_data.t, nlmpc_data.X, nlmpc_data.U, r_, qp, SimDataRep)
     sgtitle({sprintf('NLMPC (with FRA attitude)'), ...
-        sprintf('\\fontsize{10}%g Hz, %.1f s preview · %gs manouevre', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
+        sprintf('\\fontsize{10}%g Hz, %.1f s preview · %gs manoeuvre', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
 else
     fprintf('\n--- NLMPC: found no precomputed result for AttRep=FRA, Ts=%gHz, Horizon=%gs, t_man=%.2f s ---\n', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)
     figure(3); clf % clear any old/invalid plot
 end
-
-
-%% SDOPT w/ high loop rates
-
-% --- Problem setup ---
-
-qp.Ts = 1/1000;
-maneuver_time = 5.0;
-SDCAttRep = 'FRA';
-
-xmap = xq2sdc(SDCAttRep);
-A_fcn = get_SDC_A_function(SDCAttRep);
-[Q, R, C, Qy, Qyf, ~, sel] = get_weights(qp, SDCAttRep);
-[r_, x_ref_fcn, tgrid, tspan, x0] = load_fig8_traj(qp, C, ...
-    t_maneuver=maneuver_time, AttitudeRepresentation=SimDataRep);
-
-% Three controllers:
-%  (1) SD-OPT w/ shrinking horizon MPC at the terminal condition (used by default).
-%  (2) SD-OPT w/ pure preview tracking - the typical online case.
-%  (3) SD-MPC - state-dependent MPC: full recursion over the costate and cost-to-go, at each timestep. The end of the window is treated via terminal cost Qyf, instead of the continued-to-be-held reference assumption ("SDOPT seed").
-% 
-% Reference tracking and per-step compute is compared across these three configs.
-% 
-% Each controller runs at 1000Hz, with the recursion run over a decimated grid - configured below.
-% See /docs/decimation for more info.
-
-% --- Setup controllers ---
-
-% Decimation factors
-% df = 2.^(0:1:floor(log2((1/20)/qp.Ts)));  % geometric progression, up to ~20Hz preview
-df = 2.^[0, floor(log2((1/20)/qp.Ts))];  % two tiers: fine-rate then coarse-rate (no intermediate geometric progression)
-dopts = struct('DecimationFactors', df, 'StepsPerTier', df(end));
-
-ctrl_fcn_1 = @(t,x,k,u_prev) compute_u_SDOPT(t, xmap(x), k, u_prev, ...
-    r_, C, Qy, R, Qyf, qp, PreviewHorizon = SDOPTPreviewHorizon, DecimationOpts = dopts, ...
-    SDC_A_function = A_fcn, ...
-    SDC_B_function = @(uk,qp) get_B_matrix_SDRE(uk,qp));
-
-ctrl_fcn_2 = @(t,x,k,u_prev) compute_u_SDDRE_v3(t, xmap(x), k, u_prev, ...
-    r_, C, Qy, R, Qyf, qp, PreviewHorizon = SDOPTPreviewHorizon, DecimationOpts = dopts, ...
-    AlwaysUseFullFiniteHorizonMPC = false, ...
-    UseFullFiniteHorizonMPCAtTerminal = false, ...
-    SDC_A_function = A_fcn, ...
-    SDC_B_function = @(uk,qp) get_B_matrix_SDRE(uk,qp));
-
-ctrl_fcn_3 = @(t,x,k,u_prev) compute_u_SDDRE_v3(t, xmap(x), k, u_prev, ...
-    r_, C, Qy, R, Qyf, qp, PreviewHorizon = SDOPTPreviewHorizon, DecimationOpts = dopts, ...
-    AlwaysUseFullFiniteHorizonMPC = true, ...
-    SDC_A_function = A_fcn, ...
-    SDC_B_function = @(uk,qp) get_B_matrix_SDRE(uk,qp));
-
-
-% --- Closed-loop runs under each controller ---
-
-thrust_fcn = @(t) ones(1,6);
-[~, ~, C_nat, Qy_nat, Qyf_nat] = get_weights(qp, SDCAttRep); % Evaluate cost in Native coordinates
-
-ctrl_fcns = {ctrl_fcn_1, ctrl_fcn_2, ctrl_fcn_3};
-labels = {'SD-OPT (MPC at terminal)', 'SD-OPT (pure preview)', 'SD-MPC'};
-
-fprintf('\n--- SD-OPT decimated (with %s attitude) ---\n\n\n', SDCAttRep)
-c1_     = cell(1,3);
-t_      = cell(1,3);
-X_      = cell(1,3);
-U_      = cell(1,3);
-stats_  = cell(1,3);
-J_      = cell(1,3);
-Jy_     = cell(1,3);
-Ju_     = cell(1,3);
-Jy_i_   = cell(1,3);
-U_raw_  = cell(1,3);
-for i=1:3
-    [t, X, U, c1, c2, stats, U_raw] = run_sim(qp, tspan, x0, thrust_fcn, ctrl_fcns{i}, AttitudeRepresentation=SimDataRep);
-    [J, Jy, Ju, Jy_i] = compute_J_LQT(t, X, U, Qy_nat, Qyf_nat, R, C_nat, ...
-        x_ref_fcn, qp.Ts, AttitudeRepresentation=SimDataRep);
-        
-    % Store results
-    t_{i} = t; X_{i} = X; U_{i} = U;
-    c1_{i} = c1; stats_{i} = stats; U_raw_{i} = U_raw;
-    J_{i} = J; Jy_{i} = Jy; Ju_{i} = Ju; Jy_i_{i} = Jy_i;
-
-    fprintf('Config %d: %s \n', i, labels{i})
-    fprintf('  Compute : %.2f s total → %.1f Hz equivalent\n', sum(c1), length(U)/sum(c1))
-    fprintf('    running the simulation (rk4 or ode45) took up the other %.2f s\n', sum(c2))
-    print_tracking_metrics(X, r_, J, Jy, Ju, Jy_i)
-    print_saturation(U_raw, qp)
-    fprintf('\n\n')
-end
-
-% --- Plots ---
-
-nr   = size(r_,2);
-cmap = colororder;
-
-figure(4); clf
-
-ax_p = gobjects(1,3);
-ax_u = gobjects(1,3);
-ax_c = gobjects(1,3);
-for i = 1:3
-
-    t = t_{i}(1:nr);
-    X = X_{i}(1:nr,:);
-    U = U_{i};
-
-    % --- Left: position vs reference ---
-
-    ax_p(i) = subplot(3,3,3*i-2); hold on
-
-    plot(t,X(:,1))
-    plot(t,X(:,2))
-    plot(t,X(:,3))
-
-    plot(t,r_(1,:),'Color',cmap(1,:),'LineStyle','--')
-    plot(t,r_(2,:),'Color',cmap(2,:),'LineStyle','--')
-    plot(t,r_(3,:),'Color',cmap(3,:),'LineStyle','--')
-
-    grid on
-    yline(0,'Color',[1 1 1]*0.25)
-    ylabel('Position [m]')
-    legend('x','y','z')
-    title(labels{i})
-
-    % --- Middle: actuator inputs ---
-
-    ax_u(i) = subplot(3,3,3*i-1); hold on
-
-    % Actuator limits + nominal
-    yline(qp.max_du,'Color',[1 1 1]*0.5)
-    yline(0,'Color',[1 1 1]*0.67)
-    yline(-qp.nominal_omegas,'Color',[1 1 1]*0.5)
-
-    plot(t(1:end-1), U(1:nr-1,:)) % control input
-
-    grid on
-    ylabel('\delta U')
-
-    % --- Right: compute breakdown ---
-
-    t1 = [stats_{i}.TimeToComputeDiscreteSDCMatrices];
-    t2 = t1 + [stats_{i}.TimeToSolveDARE];
-    t3 = t2 + [stats_{i}.TimeToComputeFeedforward];
-
-    dt1 = 1000*t1;
-    dt2 = 1000*(t2-t1);
-    dt3 = 1000*(t3-t2);
-
-    ax_c(i) = subplot(3,3,3*i);
-    area(t_{i}(1:end-1), [dt1(:) dt2(:) dt3(:)], 'EdgeColor', 'none')
-    yline(qp.Ts * 1000, '--')
-    ylabel("Compute [ms]")
-    legend('sdc','dare','ff','Location','west')
-end
-
-links = [linkprop([ax_p ax_u ax_c], 'XLim'), ...
-         linkprop(ax_p, 'YLim'), ...
-         linkprop(ax_u, 'YLim'), ...
-         linkprop(ax_c, 'YLim')];
-setappdata(gcf, 'axis_links', links)  % links stay active only while referenced
-
-xlim(ax_p(1), [0 maneuver_time])
-ylim(ax_p(1), [-1 1]*1.1*max(abs(r_),[],'all'))
-ylim(ax_u(1), [-1 1]*400)
-ylim(ax_c(1), [-0.02 1]*qp.Ts*1.1 * 1000)
-
-xlabel(ax_p(3), 'Time [s]')
-xlabel(ax_u(3), 'Time [s]')
-xlabel(ax_c(3), 'Time [s]')
-
-sgtitle({sprintf('High loop rates w/ decimation')
-    sprintf('\\fontsize{10}%s attitude · %g Hz, %.1f s preview · %gs manouevre', SDCAttRep, 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
 
 
 %% ---- Local functions ----
