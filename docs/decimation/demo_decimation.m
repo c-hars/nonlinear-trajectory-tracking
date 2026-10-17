@@ -1,4 +1,5 @@
 clear
+root = fullfile(fileparts(mfilename('fullpath')), '..', '..'); addpath(root)
 load_paths
 load_copter_params
 
@@ -12,9 +13,9 @@ maxNumCompThreads(1);  % small matrices: multithreaded BLAS only adds timing jit
 %   Figure 4: exact vs decimated in closed loop: position error and per-step compute, each variant on its own trajectory.
 %   Figure 5: replay along the exact trajectory: the difference in control input when each decimated controller is evaluated at the exact controller's states.
 %
-% Decimation applies to the preview recursion (SD-OPT) and to the full Riccati recursion (SD-MPC). See docs/decimation/decimation.md for the details.
+% Decimation applies to the preview recursion (SD-OPT) and to the full Riccati recursion (SD-MPC). See docs/decimation/README.md for the details.
 % Per-step compute vs loop rate is covered separately, in demo_decimation_rates.m.
-
+% 
 % NB: these are PC timings. On embedded hardware without optimised matrix routines and instruction sets, compute time follows the flop count much more closely; decimation there is where the benefit is clearest (and most useful).
 
 

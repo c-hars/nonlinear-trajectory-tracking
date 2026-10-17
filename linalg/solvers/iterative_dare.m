@@ -116,7 +116,7 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
     end
 
     P_ss = P;
-    if strcmpi(opts.Method,'nk') && strcmpi(opts.DlyapSolver,'dlyap_sda')
+    if strcmpi(opts.Method,'nk') && strcmpi(func2str(opts.DlyapSolver),'dlyap_sda')
             info.SolverIterations = n_sda_iters;
     else
         info.SolverIterations = i;

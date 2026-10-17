@@ -1,4 +1,5 @@
 clear
+root = fullfile(fileparts(mfilename('fullpath')), '..', '..'); addpath(root)
 load_paths
 load_copter_params
 

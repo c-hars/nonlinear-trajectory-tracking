@@ -2,12 +2,9 @@
 
 function do_plots(t, X, U, r_, qp, AttRep)
 
-if nargin < 6
-    switch size(X,2)
-        case 12, AttRep = 'Euler'; % Assumed. But 12 state data could also be MRP or FRA.
-        case 13, AttRep = 'Quaternion ';
-        otherwise, error("Expected size(X,2) == 12 or 13");
-    end
+nx_expected = 12 + strcmp(AttRep, 'Quaternion'); % quaternion has 4 components, the others have 3
+if size(X,2) ~= nx_expected
+    error("Expected size(X,2) == %d, got %d", nx_expected, size(X,2));
 end
 
 nr = size(r_,2);
@@ -15,6 +12,7 @@ t = t(1:nr);
 X = X(1:nr,:);
 Xe = to_euler_state(X, AttRep);
 cmap = colororder;
+
 
 %%
 
@@ -36,6 +34,7 @@ legend('x','y','z')
 xlim([0 t(end)])
 ylim([-1 1]*1.1*max(abs(r_),[],'all'))
 
+
 %%
 
 subplot(3,1,2); hold on
@@ -48,11 +47,11 @@ plot(t, Xe(:,9)*180/pi)
 grid on
 yline(0,'Color',[1 1 1]*0.25,'HandleVisibility','off')
 ylabel('Euler angles [deg]')
-% legend
 legend('\phi','\theta','\psi')
 
 xlim([0 t(end)])
 ylim([-1 1]*60)
+
 
 %%
 
@@ -71,6 +70,7 @@ ylabel('\delta U')
 xlim([0 t(end)])
 ylim([-1 1]*400)
 
+
 %%
 
 % Optional extra plot: tracking error over time.
@@ -79,8 +79,6 @@ ylim([-1 1]*400)
 
 % % Tracking error over time [cm]
 % tracking_err = Xe(:,1:3)' - r_(1:3,:);
-% disp(Xe(1:10,1:3)')
-% disp(r_(1:3,1:10))
 % plot(t, vecnorm(tracking_err*100), 'k--')
 
 % grid on
@@ -93,5 +91,6 @@ ylim([-1 1]*400)
 %%
 
 xlabel('Time [s]')
+
 
 end
