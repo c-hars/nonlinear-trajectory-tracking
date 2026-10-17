@@ -71,6 +71,24 @@ ylabel('\delta U')
 xlim([0 t(end)])
 ylim([-1 1]*400)
 
+%%
+
+% Optional extra plot: tracking error over time.
+
+% subplot(4,1,4); hold on
+
+% % Tracking error over time [cm]
+% tracking_err = Xe(:,1:3)' - r_(1:3,:);
+% disp(Xe(1:10,1:3)')
+% disp(r_(1:3,1:10))
+% plot(t, vecnorm(tracking_err*100), 'k--')
+
+% grid on
+% ylabel('Error [cm]')
+
+% xlim([0 t(end)])
+% ylim('padded')
+
 
 %%
 

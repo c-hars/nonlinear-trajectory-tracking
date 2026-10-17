@@ -59,8 +59,8 @@ for ir = 1:numel(SweepRates)
 
     fcns = cell(1, nc);
     for ic = 1:nc
-        if is_exact(ic), dopts = []; else, dopts = make_dopts(qp.Ts, cfgs(ic).layout); end
-        fcns{ic} = make_ctrl(prob, SDOPTPreviewHorizon, cfgs(ic).full_mpc, dopts, cfgs(ic).held_x);
+        if is_exact(ic), dopts = []; else, dopts = make_dopts(qp.Ts, cfgs(ic).layout, cfgs(ic).held_x); end
+        fcns{ic} = make_ctrl(prob, SDOPTPreviewHorizon, cfgs(ic).full_mpc, dopts);
     end
 
     % Untimed warm-up: mitigates JIT and CPU clock ramp-up skewing the timings
@@ -119,7 +119,8 @@ for ir = 1:numel(SweepRates)
     leg   = [{cfgs.label}, {'real-time limit (T_s)'}];
     order = [1 4 9, 2 5 6, 3 7 8];  % legend columns: exact | geometric | two-tier; rows: SD-OPT, SD-MPC, held-x (indices into cfgs)
     legend(h(order), leg(order), 'Location', 'northwest', 'NumColumns', 3)
-    title(sprintf('Per-step compute vs loop rate (%.1f s preview)', SDOPTPreviewHorizon))
+    title({'Loop rate vs per-step compute', ...
+            sprintf('\\fontsize{10}%g–%gHz | %.1f s prediction horizon', SweepRates(1), SweepRates(end), SDOPTPreviewHorizon)})
 
     % Figure 2: tracking cost, relative to exact
     figure(2); clf; hold on
@@ -135,7 +136,8 @@ for ir = 1:numel(SweepRates)
     ylabel('\DeltaJ vs exact [%]')
     order = [2 5 6, 3 7 8];  % as Figure 1, without the exact column
     legend(h(order), {cfgs(order).label}, 'Location', 'northwest', 'NumColumns', 2)
-    title(sprintf('Tracking cost vs loop rate, relative to exact (%.1f s preview)', SDOPTPreviewHorizon))
+    title({'Loop rate vs tracking cost', ...
+         sprintf('\\fontsize{10}%g–%gHz | %.1f s prediction horizon', SweepRates(1), SweepRates(end), SDOPTPreviewHorizon)})
     drawnow
 end
 
@@ -157,7 +159,7 @@ function prob = setup_problem(qp, maneuver_time, SDCAttRep)
         t_maneuver=maneuver_time, AttitudeRepresentation=prob.SimDataRep);
 end
 
-function dopts = make_dopts(Ts, layout)
+function dopts = make_dopts(Ts, layout, held_x)
 % Decimation layouts, both reaching a ~20Hz far-horizon preview:
 %   geometric: factors 1, 2, 4, ... up to ~20Hz
 %   two-tier:  factor 1, then straight to ~20Hz
@@ -166,25 +168,22 @@ function dopts = make_dopts(Ts, layout)
     switch layout
         case 'geometric'
             df = 2.^(0:n);
-            dopts = struct('DecimationFactors', df, 'StepsPerTier', df(end));
+            dopts = struct('DecimationFactors', df, 'StepsPerTier', df(end), 'UseHeldXAssumption', held_x);
         case 'two-tier'
             df = unique(2.^[0, n]);  % unique: just [1] at 20Hz
-            dopts = struct('DecimationFactors', df, 'StepsPerTier', 2*df(end));
+            dopts = struct('DecimationFactors', df, 'StepsPerTier', 2*df(end), 'UseHeldXAssumption', held_x);
         otherwise
             error("Unknown layout: '%s'", layout)
     end
 end
 
-function fcn = make_ctrl(prob, horizon, full_mpc, dopts, held_x)
+function fcn = make_ctrl(prob, horizon, full_mpc, dopts)
 % SD-OPT (pure preview): full_mpc = false
 % SD-MPC:                full_mpc = true
 % dopts:  decimation options ([] = exact)
-% held_x: UseHeldXAssumption (default false; decimated SD-MPC only)
-    if nargin < 5, held_x = false; end
     xmap = prob.xmap;
     fcn = @(t,x,k,u_prev) compute_u_SDDRE_v3(t, xmap(x), k, u_prev, ...
         prob.r_, prob.C, prob.Qy, prob.R, prob.Qyf, prob.qp, ...
-        UseHeldXAssumption = held_x, ...
         PreviewHorizon = horizon, ...
         DecimationOpts = dopts, ...
         AlwaysUseFullFiniteHorizonMPC = full_mpc, ...

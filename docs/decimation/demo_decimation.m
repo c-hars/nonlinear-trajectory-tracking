@@ -24,7 +24,7 @@ maxNumCompThreads(1);  % small matrices: multithreaded BLAS only adds timing jit
 %  'SD-OPT (pure preview)':    preview control throughout, with the reference held past its end - the typical online case (no shrinking-horizon effects at the terminal).
 %  'SD-MPC':                   full state-dependent MPC: the full Riccati recursion over the cost-to-go and costate, every step. The end of the window is treated via terminal cost Qyf, instead of the held-reference assumption ("SDOPT seed").
 %
-% The MPC recursion (SD-MPC, and the terminal phase of SD-OPT (MPC at terminal)) also gets a held-x variant - see UseHeldXAssumption in compute_u_SDDRE_v3.
+% Controllers with an MPC recursion (SD-MPC, and the terminal phase of SD-OPT (MPC at terminal)) also get held-x on/off variants - see UseHeldXAssumption, DecimationOpts, compute_u_SDDRE_v3.
 
 Config = 'SD-OPT (MPC at terminal)';
 % Config = 'SD-OPT (pure preview)';
@@ -41,6 +41,7 @@ InputUnits = 'RPM';        % RPM, rad/s - inputs are plotted as the deviation fr
 
 prob  = setup_problem(qp, maneuver_time, SDCAttRep);
 dopts = make_dopts(qp.Ts);
+dopts_hx = dopts; dopts_hx.UseHeldXAssumption = true;
 
 switch Config
     case 'SD-OPT (MPC at terminal)', full_mpc = false; mpc_at_terminal = true;
@@ -54,13 +55,11 @@ end
 % (cidx: colour index, consistent across the figures)
 if full_mpc || mpc_at_terminal
     variants = struct('label',  {'decimated (w/ held-x)', 'decimated', 'exact'}, ...
-                      'dopts',  {dopts, dopts, []}, ...
-                      'held_x', {true, false, false}, ...
+                      'dopts',  {dopts_hx, dopts, []}, ...
                       'cidx',   {4, 2, 1});
 else
     variants = struct('label',  {'decimated', 'exact'}, ...
                       'dopts',  {dopts, []}, ...
-                      'held_x', {false, false}, ...
                       'cidx',   {2, 1});
 end
 nv = numel(variants);
@@ -82,7 +81,7 @@ end
 %% Figure 1: the preview grid
 
 % One controller call at the initial state, just to get the grid it builds
-f_dec = make_ctrl(prob, SDOPTPreviewHorizon, full_mpc, mpc_at_terminal, dopts, false);
+f_dec = make_ctrl(prob, SDOPTPreviewHorizon, full_mpc, mpc_at_terminal, dopts);
 [~, info0] = f_dec(0, prob.x0, 1, zeros(6,1));
 grid_ = info0.PreviewGrid;
 n_rec = grid_.n_fine_rem + sum(grid_.n_blocks);
@@ -113,7 +112,7 @@ drawnow
 
 %% Closed-loop runs: decimated, then exact
 
-fcns = arrayfun(@(v) make_ctrl(prob, SDOPTPreviewHorizon, full_mpc, mpc_at_terminal, v.dopts, v.held_x), ...
+fcns = arrayfun(@(v) make_ctrl(prob, SDOPTPreviewHorizon, full_mpc, mpc_at_terminal, v.dopts), ...
     variants, 'UniformOutput', false);
 
 fprintf('\n--- %s (%.1fs maneuver, %g Hz, %.1fs preview, %s attitude) ---\n', ...
@@ -266,7 +265,7 @@ xlabel(ax_u(nv), 'Time [s]')
 xlabel(ax_c(nv), 'Time [s]')
 
 sgtitle({'Decimated vs exact: states, inputs and compute', ...
-         sprintf('\\fontsize{10}each in closed loop on its own trajectory · %s, %g Hz, %.1f s preview', Config, 1/qp.Ts, SDOPTPreviewHorizon)})
+         sprintf('\\fontsize{10}%s, %g Hz, %.1f s preview', Config, 1/qp.Ts, SDOPTPreviewHorizon)})
 drawnow
 
 
@@ -317,7 +316,7 @@ xlabel(ax_a(nv-1), 'Time [s]')
 xlabel(ax_u(nv-1), 'Time [s]')
 
 sgtitle({'Decimated vs exact: state and input differences', ...
-         sprintf('\\fontsize{10}\\Delta = decimated - exact, each in closed loop on its own trajectory · %s, %g Hz, %.1f s preview', Config, 1/qp.Ts, SDOPTPreviewHorizon)})
+         sprintf('\\fontsize{10}\\Delta = decimated - exact · %s, %g Hz, %.1f s preview', Config, 1/qp.Ts, SDOPTPreviewHorizon)})
 drawnow
 
 
@@ -358,7 +357,7 @@ xlim(ax(1), [0 prob.tspan(end)])
 xlabel('Time [s]')
 
 sgtitle({'Decimated vs exact: tracking error and compute', ...
-         sprintf('\\fontsize{10}each in closed loop on its own trajectory · %s, %g Hz, %.1f s preview', Config, 1/qp.Ts, SDOPTPreviewHorizon)})
+         sprintf('\\fontsize{10}%s, %g Hz, %.1f s preview', Config, 1/qp.Ts, SDOPTPreviewHorizon)})
 drawnow
 
 
@@ -422,23 +421,21 @@ function dopts = make_dopts(Ts)
 % Geometric progression of decimation factors (1, 2, 4, ...), up to a ~20Hz far-horizon preview.
 % This is the default layout, but the decimation options are an open design parameter.
     df = 2.^(0:floor(log2((1/20)/Ts)));
-    dopts = struct('DecimationFactors', df, 'StepsPerTier', df(end));
+    dopts = struct('DecimationFactors', df, 'StepsPerTier', df(end), 'UseHeldXAssumption', false);
 
     % Alternative: two tiers - fine, then straight to ~20Hz (no intermediate geometric progression)
     % df = 2.^[0, floor(log2((1/20)/Ts))];
-    % dopts = struct('DecimationFactors', df, 'StepsPerTier', 2*df(end));
+    % dopts = struct('DecimationFactors', df, 'StepsPerTier', 2*df(end), 'UseHeldXAssumption', false);
 end
 
-function fcn = make_ctrl(prob, horizon, full_mpc, mpc_at_terminal, dopts, held_x)
+function fcn = make_ctrl(prob, horizon, full_mpc, mpc_at_terminal, dopts)
 % SD-OPT (MPC at terminal): mpc_at_terminal
 % SD-OPT (pure preview):    neither flag
 % SD-MPC:                   full_mpc
 % dopts:  decimation options ([] = exact)
-% held_x: UseHeldXAssumption (decimated MPC recursion only)
     xmap = prob.xmap;
     fcn = @(t,x,k,u_prev) compute_u_SDDRE_v3(t, xmap(x), k, u_prev, ...
         prob.r_, prob.C, prob.Qy, prob.R, prob.Qyf, prob.qp, ...
-        UseHeldXAssumption = held_x, ...
         PreviewHorizon = horizon, ...
         DecimationOpts = dopts, ...
         AlwaysUseFullFiniteHorizonMPC = full_mpc, ...

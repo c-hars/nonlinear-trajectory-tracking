@@ -14,13 +14,13 @@ Consider kHz-rate control of the hexacopter. Computing and applying the feedback
 
 A similar decimation scheme applies to the shrinking horizon / MPC mode, where the full Riccati recursion is needed (which includes the time-varying cost-to-go/gain, as well as the costate).
 
-## Glossary: "decimated recursions" and multi-rate MPC
+## Glossary: "decimated recursions" and non-uniformly spaced prediction horizons
 
 Terminology, useful for understanding the functions in the repo and the math that follows.
 
 - **Fine step:** a prediction step of duration `Ts`.
 - **Coarse step:** a prediction step covering more time than a fine step (duration > `Ts`); lower model fidelity, faster compute. A coarse step has duration `d*Ts`, where `d` is the decimation factor; `d` consecutive fine steps are grouped and approximated as one coarse step.
-- **Block:** a discrete-time step over `d*Ts` seconds; 'block' is shorthand for this chunk of time.
+- **Block:** a discrete-time step over `d*Ts` seconds; 'block' is shorthand for this chunk of time. In the MPC recursion, the input is held across each block (*move blocking*); in preview control, the fine-rate feedback still acts within it.
 - **Coarse matrices:** `(A_d, B_d, Qy_d, R_d)` – the system matrices `(A, B, Q, R)` after applying a decimation factor. They represent the same† continuous-time dynamics and OCP formulation `(Ac, Bc, Qy_c, R_c)`, but discretised at a different (lower-resolution) sampling rate. Also referred to as `d`-step matrices.
 - **Fine recursion:** a backward recursion processing one fine step at a time.
 - **Coarse recursion:** a backward recursion processing one coarse step at a time.
@@ -28,7 +28,7 @@ Terminology, useful for understanding the functions in the repo and the math tha
   - **Far-horizon tier:** the final tier – farthest from the current time, and uses the largest decimation factor. Absorbs whatever horizon remains after the near-horizon tiers.
   - **Near-horizon tier:** any tier other than the far-horizon tier. Each holds `StepsPerTier` steps; each step spans a block of `d` fine steps.
 - **Remainder fine steps:** fine steps that don't fit cleanly into the tier schedule; the prediction horizon of `M` steps might have a remainder. These are not discarded, instead they're placed nearest to the current time and processed by the fine recursion.
-- **Preview grid:** the full arrangement across the preview horizon. Forward in time: remainder fine steps → near-horizon tiers → far-horizon tier → preview endpoint. The backward recursion processes this in reverse.
+- **Preview grid:** the full arrangement across the preview horizon. Forward in time: remainder fine steps → near-horizon tiers → far-horizon tier → preview endpoint. The backward recursion processes this in reverse. In the MPC literature, this is a *non-uniform time grid* or *non-uniformly spaced prediction horizon*.
 
 > (†) not exactly the same: some approximation also occurs, described further on.
 
@@ -305,7 +305,7 @@ If we then introduce a held-x assumption (along with the held-u assumption), the
 $$ x_k^T Q_d x_k $$
 where $ Q_d = dQ $. The cross term $N_d$ and the input term $S_d$ both vanish.
 
-The held-x assumption is used in the implementation for a few reasons. Apart from maintaining simplicity, the held-x assumption also maintains the spirit of decimation: far in the prediction horizon, trust the prediction model less. That includes the state evolution model (held-x assumption), not just move blocking (held-u assumption). It's a cleaner design that also tends to yield slightly better tracking (and slightly faster compute).
+Both forms are provided (`UseHeldXAssumption` in `DecimationOpts`), and both are standard. acados' default Euler cost discretisation is held-x (as in [1, 2, 3]), while move blocking in MATLAB's MPC Toolbox (and acados' integrated cost) keeps the exact block cost. Held-x suits the spirit of decimation (far in the horizon, trust the model less, including the state evolution), and it is cheaper per coarse step, since the within-block sums ($Q_d$, $N_d$, $S_d$, $G_d$, $H_d$) are no longer needed. The default is the exact block cost, which keeps the undecimated OCP apart from move blocking and block-averaged $r$. In closed loop, both typically stay close to the undecimated controller (see `demo_decimation.m`).
 
 ---
 
@@ -351,7 +351,7 @@ so the $d$-step costate update is then simply:
 $$
 v \leftarrow A_{cl,d}^T v + C^T (d Q_y) \bar{r}
 $$
-Note that under held-x, the block averaging of $r$ becomes *exact* rather than an assumption: with the state held, only the sum of the references matters. This is another reason why the held-x assumption was chosen; it opens up a clean way of decimating $r$ without full information loss; block-averaging instead of downsampling.
+Note that under held-x, the block averaging of $r$ becomes *exact* rather than an assumption: with the state held, only the sum of the references matters. This is another point in favour of held-x; it opens up a clean way of decimating $r$ without full information loss; block-averaging instead of downsampling.
 
 ## Appendix: $d$-step Riccati recursion: full derivation (including within-block feedforward)
 
@@ -521,8 +521,14 @@ In the implementation, the coarse gains are never applied: they only propagate $
 
 where $x_i = A_i x + B_i u$. Under held-$x$, the stage cost counts the block-start state $d$ times (hence $dQ$, $dR$, $d\bar{q}$) rather than following the state through the block, i.e. a left-rectangle approximation of the total block cost.
 
-**Why this is reasonable.** The $d$-step dynamics are untouched, so only the cost within each block is approximated. This error scales with how far the state moves within a block, which is small for typical $d$, and located in the far-horizon, where the prediction is least accurate and fidelity matters least. In testing, the exact version added complexity without improving performance, though it introduces another approximation relative to the undecimated recursion – held-x, as well as held-u.
+**Why this is reasonable.** The $d$-step dynamics are untouched, so only the cost within each block is approximated. This error scales with how far the state moves within a block – which is small for typical $d$, and located in the far-horizon, where the prediction is least accurate, and fidelity matters least. Held-x does alter the OCP slightly – one more approximation on top of move blocking and block-averaged $r$ – but in closed loop, feedback largely absorbs any difference in control (see `demo_decimation.m`).
 
-**Parallel with a $d T_s$ discretisation.** Held-$x$ makes each block exactly *what a system sampled at* $d T_s$ *sees*: the exact ZOH transition $(A_d, B_d)$, just with the state and input cost applied at the block boundaries. Each coarse step is therefore exactly the Riccati step of the system at sample rate `d*T_s`, i.e. $(A_d, B_d, dQ, dR)$; $K_d$ is that system's gain and $P=P_d$ is its cost-to-go.
+**Parallel with a $d T_s$ discretisation.** Held-$x$ makes each block exactly *what a system sampled at* $d T_s$ *sees*: the ZOH transition $(A_d, B_d)$, with the state and input cost applied only at the block boundaries. Each coarse step is therefore exactly the Riccati step of the $d T_s$ system with scaled costs, $(A_d, B_d, dQ, dR)$; $K_d$ is that system's gain and $P=P_d$ is its cost-to-go. It replaces $d$ fine steps with one evaluation – and the scaling changes the size of $P$, keeping it in the same units as the fine steps it's combined with, so that coarse and fine steps can be mixed freely throughout the recursion.
 
-Also note that since $P$ accumulates the cost-to-go for $d$ fine steps, $P$ remains representative of the cost-to-go for fine steps throughout the recursion, i.e. coarse and fine steps can be mixed freely throughout the recursion, under the same update formulas.
+## References
+
+[1] C. K. Tan, M. J. Tippett, J. Bao, *Model predictive control with non-uniformly spaced optimization horizon for multi-timescale processes*, 2016. doi:10.1016/j.compchemeng.2015.08.010
+
+[2] T. Brüdigam, D. Prader, D. Wollherr, M. Leibold, *Model Predictive Control with Models of Different Granularity and a Non-uniformly Spaced Prediction Horizon*, 2021. doi:10.23919/ACC50511.2021.9482617
+
+[3] F. Ahmed, L. Sobiesiak, J. R. Forbes, *Model Predictive Control of a Tandem-Rotor Helicopter With a Nonuniformly Spaced Prediction Horizon*, 2022. doi:10.1109/LCSYS.2022.3178785

@@ -13,10 +13,9 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
         opts.SDC_A_function = @ get_A_matrix_SDRE_EulerAttitude
         opts.SDC_B_function = @ get_B_matrix_SDRE
         opts.PreviewHorizon = 2.0 % this is all really designed for finite-horizon formulations, with the horizon large (>= 2.0 for our case) -- but inf is a safe choice, just get delayed tracking
-        opts.UseFullFiniteHorizonMPCAtTerminal = true % best set to false if you need precisely consistent/predictable solve times - adds a bit of overhead to do the full recursion for K too
-        opts.AlwaysUseFullFiniteHorizonMPC = false % set to true → regression to the standard MPC cost function being optimised / directly comparable OCP with LinMPC, NLMPC -- no longer optimal preview control that uses the infinite/finite horizon split (core part of the algorithm!)
-        opts.DecimationOpts = []  % example: struct('DecimationFactors', [1], 'StepsPerTier', 1)
-        opts.UseHeldXAssumption = true % true → held-x assumption, false → exact block cost (cross term N_d, within-block costate terms). Only affects the decimated SD-MPC recursion
+        opts.UseFullFiniteHorizonMPCAtTerminal = true  % toggles the switch to (shrinking horizon) MPC at the terminal stage
+        opts.AlwaysUseFullFiniteHorizonMPC = false  % true → standard MPC (full Riccati recursion with terminal cost Qyf), false → preview control (which this algorithm is designed around)
+        opts.DecimationOpts = []  % example: struct('DecimationFactors', [1 2 4], 'StepsPerTier', 4, 'UseHeldXAssumption', false). UseHeldXAssumption is optional and only affects the decimated MPC recursion
         opts.PrintPreviewGrid = false
 
         opts.DARESolver (1,:) char {mustBeMember(opts.DARESolver, {'nk','riccati','cold','idare','dlqr','sda'})} = 'nk'
@@ -133,7 +132,8 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
             end
         else
             grid = build_horizon_grid(n_preview, opts.DecimationOpts);
-            [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, grid, opts.UseHeldXAssumption);
+            use_held_x = isfield(opts.DecimationOpts, 'UseHeldXAssumption') && opts.DecimationOpts.UseHeldXAssumption;
+            [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, grid, use_held_x);
             solve_info.PreviewGrid = grid;
         end
 
