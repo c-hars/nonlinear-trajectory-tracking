@@ -45,7 +45,8 @@ print_tracking_metrics(X, r_, J, Jy, Ju, Jy_i)
 
 figure(1); clf
 do_plots(t, X, U, r_, qp, 'Euler')
-sgtitle('LQT')
+sgtitle({'LQT (with Euler attitude)', ...
+    sprintf('\\fontsize{10}%g Hz, %.1f s preview · %gs manoeuvre', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
 
 
 %% Nonlinear control (SD-OPT, "State Dependent Optimal Preview Tracking")
@@ -88,7 +89,8 @@ print_saturation(U_raw, qp)
 
 figure(2); clf
 do_plots(t, X, U, r_, qp, SimDataRep)
-sgtitle(sprintf('SD-OPT (with %s attitude)', SDCAttRep))
+sgtitle({sprintf('SD-OPT (with %s attitude)', SDCAttRep), ...
+    sprintf('\\fontsize{10}%g Hz, %.1f s preview · %gs manoeuvre', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
 
 
 %% Alternative: 3D trajectory plot - show the reference path versus and what was actually tracked.
@@ -111,8 +113,10 @@ sgtitle(sprintf('SD-OPT (with %s attitude)', SDCAttRep))
 
 %% Compare with precomputed NLMPC (too slow to recompute live)
 
-nlmpc_file = sprintf('data/nlmpc_fra_cold_con_Ts%gHz_tman%s_H%g.mat', 1/qp.Ts, ...
+nlmpc_fname = sprintf('nlmpc_fra_cold_con_Ts%gHz_tman%s_H%g.mat', 1/qp.Ts, ...
     strrep(num2str(maneuver_time), '.', 'p'), SDOPTPreviewHorizon);
+root = fileparts(mfilename('fullpath'));
+nlmpc_file = fullfile(root,'data',nlmpc_fname);
 
 if isfile(nlmpc_file)
     nlmpc_data = load(nlmpc_file);
@@ -135,9 +139,10 @@ if isfile(nlmpc_file)
 
     figure(3); clf
     do_plots(nlmpc_data.t, nlmpc_data.X, nlmpc_data.U, r_, qp, SimDataRep)
-    sgtitle(sprintf('NLMPC (with FRA attitude)'))
+    sgtitle({sprintf('NLMPC (with FRA attitude)'), ...
+        sprintf('\\fontsize{10}%g Hz, %.1f s preview · %gs manoeuvre', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)})
 else
-    fprintf('\n--- NLMPC: no precomputed result for Ts=%gHz, Horizon=%gs, t_man=%.2f s ---\n', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)
+    fprintf('\n--- NLMPC: found no precomputed result for AttRep=FRA, Ts=%gHz, Horizon=%gs, t_man=%.2f s ---\n', 1/qp.Ts, SDOPTPreviewHorizon, maneuver_time)
     figure(3); clf % clear any old/invalid plot
 end
 
@@ -170,14 +175,5 @@ function print_saturation(U_raw, qp, tol)
     else
         fprintf('  Saturation: %.1f%% of actuator samples, %.1f%% of timesteps\n', ...
             100*sum(sat,'all')/numel(sat), 100*sum(any(sat,2))/size(sat,1))
-    end
-end
-
-function A_fcn = get_SDC_A_function(rep)
-    switch lower(rep)
-        case 'euler',      A_fcn = @(xk,qp) get_A_matrix_SDRE_EulerAttitude(xk,qp);
-        case 'mrp',        A_fcn = @(xk,qp) get_A_matrix_SDRE_MRPAttitude(xk,qp);
-        case 'fra',        A_fcn = @(xk,qp) get_A_matrix_SDRE_FRAAttitude(xk,qp);
-        case 'quaternion', A_fcn = @(xk,qp) get_A_matrix_SDRE_QuaternionAttitude(xk,qp);
     end
 end

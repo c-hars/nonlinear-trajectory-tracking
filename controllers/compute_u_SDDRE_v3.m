@@ -1,4 +1,4 @@
-function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts)
+function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,qp,opts)
     arguments
         tk
         xk
@@ -9,18 +9,30 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
         Qy
         R
         Qyf
-        tf
         qp
-        opts.DecimationFactor = 1 % idea - for future work :) Not implemented.
         opts.SDC_A_function = @ get_A_matrix_SDRE_EulerAttitude
         opts.SDC_B_function = @ get_B_matrix_SDRE
         opts.PreviewHorizon = 2.0 % this is all really designed for finite-horizon formulations, with the horizon large (>= 2.0 for our case) -- but inf is a safe choice, just get delayed tracking
-        opts.UseFullFiniteHorizonMPCAtTerminal = true % best set to false if you need precisely consistent/predictable solve times - adds a bit of overhead to do the full recursion for K too
-        opts.AlwaysUseFullFiniteHorizonMPC = false % set to true → regression to the standard MPC cost function being optimised / directly comparable OCP with LinMPC, NLMPC -- no longer optimal preview control that uses the infinite/finite horizon split (core part of the algorithm!)
+        opts.UseFullFiniteHorizonMPCAtTerminal = true  % toggles the switch to (shrinking horizon) MPC at the terminal stage
+        opts.AlwaysUseFullFiniteHorizonMPC = false  % true → standard MPC (full Riccati recursion with terminal cost Qyf), false → preview control (which this algorithm is designed around)
+        opts.DecimationOpts = []  % example: struct('DecimationFactors', [1 2 4], 'StepsPerTier', 4, 'UseHeldXAssumption', false). UseHeldXAssumption is optional and only affects the decimated MPC recursion
+        opts.PrintPreviewGrid = false
 
         opts.DARESolver (1,:) char {mustBeMember(opts.DARESolver, {'nk','riccati','cold','idare','dlqr','sda'})} = 'nk'
         opts.DARESolverOpts (1,1) struct = struct()
     end
+
+    % --- 0. Bookkeeping ---
+    % run_sim() needs homogenous solve_info: populate upfront with dummy data
+    solve_info = struct( ...
+        'TimeToComputeDiscreteSDCMatrices', 0, ...
+        'DARESolverTolAchieved', NaN, ...
+        'DARESolverNumIters', NaN, ...
+        'DARESolverSuccess', NaN, ...
+        'TimeToSolveDARE', 0, ...
+        'TimeToComputeFeedforward', 0, ...
+        'PreviewGrid', []);
+
 
     % --- 1. Compute the (ZOH-discretised) SDC matrices ---
 
@@ -33,136 +45,385 @@ function [u,solve_info] = compute_u_SDDRE_v3(tk,xk,k,uk,r_,C,Qy,R,Qyf,tf,qp,opts
     solve_info.TimeToComputeDiscreteSDCMatrices = toc(clock_start);
 
 
-    % --- 2. Solve the DARE for P_ss, K_ss ---
+    % --- 2. Compute the control inputs: u = -K*x + Kv*v ---
 
-    persistent P_ss K_ss
+    n_preview = round(opts.PreviewHorizon/qp.Ts);
+
+    % One-time diagnostic: print the preview grid
+    if k == 1 && opts.PrintPreviewGrid && ~isinf(n_preview) && ~isempty(opts.DecimationOpts)
+        print_horizon_grid(build_horizon_grid(n_preview, opts.DecimationOpts), qp);
+    end
+
+    approachingTerminal = ~isinf(n_preview) && (k + n_preview >= length(r_));
+    using_full_finite_horizon_mpc = opts.AlwaysUseFullFiniteHorizonMPC || (opts.UseFullFiniteHorizonMPCAtTerminal && approachingTerminal);
+    using_preview_control = ~using_full_finite_horizon_mpc;
+    
+    if using_preview_control
+
+    % --- 2.1: SD-OPT path ---
+    % Preview control: uses the infinite horizon gain/cost-to-go plus a reference preview term.
+
+        % --- 2.1.1: Solve the DARE for P_ss, K_ss ---
+
+        clock_start = tic;
+        Q = C'*Qy*C;
+        [P_ss, K_ss, dare_info] = solve_dare(A, B, Q, R, k, opts.DARESolver, opts.DARESolverOpts);
+        solve_info.DARESolverTolAchieved = dare_info.TolAchieved;
+        solve_info.DARESolverNumIters    = dare_info.NumIters;
+        solve_info.DARESolverSuccess     = dare_info.Success;
+        solve_info.TimeToSolveDARE = toc(clock_start);
+
+        % --- 2.1.2: Compute the preview term v_{k+1} ---
+
+        clock_start = tic;
+        A_cl  = A - B*K_ss;
+        if isinf(opts.PreviewHorizon)
+            % Constant reference approximation: no recursion
+            v_k1  = (eye(12) - A_cl') \ (C'*Qy*r_(:,k));
+        else
+            % Recursion over the preview window
+            r_ = r_(:, min(1:k+n_preview, end));  % pad the reference if needed
+            F = A_cl';
+            if isempty(opts.DecimationOpts) || all(opts.DecimationOpts.DecimationFactors == 1)
+                % No decimation: standard Riccati recursion for the preview
+                v_k1 = (eye(12) - F) \ C'*Qy*r_(:, k+n_preview);  % SDOPT seed
+                for j = n_preview-1:-1:1
+                    v_k1 = F*v_k1 + C'*Qy*r_(:, k+j);
+                end
+            else
+                % Decimation: the preview grid is constructed and processed on a coarser layout - not all at the full sample rate - as determined by DecimationOpts
+                grid = build_horizon_grid(n_preview, opts.DecimationOpts);
+                v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid);
+                solve_info.PreviewGrid = grid;
+            end
+        end
+        solve_info.TimeToComputeFeedforward = toc(clock_start);
+
+        % --- 2.1.3: Control input ---
+
+        Kv = (R + B'*P_ss*B) \ B';
+        u = -K_ss*xk + Kv*v_k1;
+
+
+    else
+
+    % --- 2.2: SD-MPC path ---
+    % State-dependent MPC: runs the full Riccati recursion to get both the gain and preview terms. No DARE
+    % This branch is primarily used for shrinking horizon MPC (at the terminal stage)
+    % Also can be used to run standard MPC machinery on the whole problem, not just the terminal part.
+
+        clock_start = tic;
+
+        % --- 2.2.1: Horizon and terminal conditions ---
+
+        n_preview = min(n_preview, length(r_) - k);  % shrinks as the end of the reference approaches
+        P    = C'*Qyf*C;
+        v_k1 = C'*Qyf*r_(:, k+n_preview);
+
+        % --- 2.2.2: Riccati recursion (gain + preview) ---
+
+        if isempty(opts.DecimationOpts) || all(opts.DecimationOpts.DecimationFactors == 1)
+            % No decimation: standard Riccati recursion
+            for j = n_preview-1:-1:1
+                K    = (R + B'*P*B) \ (B'*P*A);
+                A_cl = A - B*K;
+                P    = C'*Qy*C + K'*R*K + A_cl'*P*A_cl;
+                v_k1 = A_cl'*v_k1 + C'*Qy*r_(:, k+j);
+            end
+        else
+            grid = build_horizon_grid(n_preview, opts.DecimationOpts);
+            use_held_x = isfield(opts.DecimationOpts, 'UseHeldXAssumption') && opts.DecimationOpts.UseHeldXAssumption;
+            [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, grid, use_held_x);
+            solve_info.PreviewGrid = grid;
+        end
+
+        % --- 2.2.3: Control input ---
+
+        solve_info.TimeToComputeFeedforward = toc(clock_start); % Note: slight misnomer here - should be TimeToComputeRecursion. Kept for now (maintains the same struct format as the SDOPT branch).
+
+        Kk  = (R + B'*P*B) \ (B'*P*A);
+        Kvk = (R + B'*P*B) \ B';
+        u   = -Kk*xk + Kvk*v_k1;
+
+    end
+
+end
+
+function print_horizon_grid(grid, qp)
+% One-time diagnostic: print the preview grid
+
+    n_fine_tier = grid.n_blocks .* grid.df_;
+
+    fprintf('  Preview grid (%d steps/tier, %d remainder):\n', grid.n_steps_per_tier, grid.n_fine_rem);
+    fprintf('         DF: %s\n', sprintf('%6d', grid.df_));
+    fprintf('  FineSteps: %s  (+ %d = %d)\n', sprintf('%6d', n_fine_tier), grid.n_fine_rem, sum(n_fine_tier) + grid.n_fine_rem);
+    fprintf('       Span: %s s  (far-horizon: %.1f Hz)\n', sprintf('%6.3f', n_fine_tier * qp.Ts), 1/(grid.df_(end)*qp.Ts));
+end
+
+function grid = build_horizon_grid(n_preview, DecimationOpts)
+% Partition the preview horizon into remainder fine steps, near-horizon tiers and the far-horizon tier.
+
+    df_ = sort(DecimationOpts.DecimationFactors(:)', 'ascend');
+    n_steps_per_tier = DecimationOpts.StepsPerTier;
+    n_tiers = length(df_);
+
+    n_fine      = n_preview - 1;
+    n_fine_near = n_steps_per_tier * sum(df_(1:end-1));
+
+    grid.df_               = df_;
+    grid.n_tiers           = n_tiers;
+    grid.n_steps_per_tier  = n_steps_per_tier;
+    grid.n_fine            = n_fine;
+    grid.n_fine_near       = n_fine_near;
+
+    % Fill tiers: fine-to-coarse
+    % > Truncated to best fit. If DecimationOpts specifies a preview grid layout that is too short: the grid shrinks, one block at a time; the specified structure is maintained, but truncated as necessary (until eventually only fine steps remain).
+    % > Otherwise (the usual case): every near tier gets its full StepsPerTier blocks, the far tier takes as many whole blocks as fit in the rest, and the leftover becomes the fine remainder.
+    budget   = n_fine;
+    n_blocks = zeros(1, n_tiers);
+    for i = 1:n_tiers-1
+        n_blocks(i) = min(n_steps_per_tier, floor(budget / df_(i)));
+        budget = budget - n_blocks(i) * df_(i);
+    end
+    n_blocks(n_tiers) = floor(budget / df_(end));
+    n_coarse_far = n_blocks(n_tiers);
+    n_fine_rem   = budget - n_coarse_far * df_(end);
+    grid.n_blocks = n_blocks;  % blocks per tier
+
+    tier_start = zeros(1, n_tiers);
+    cursor = n_fine_rem + 1;
+    for i = 1:n_tiers-1
+        tier_start(i) = cursor;
+        cursor = cursor + n_blocks(i) * df_(i);
+    end
+    tier_start(n_tiers) = cursor;  % far-horizon tier starts here
+
+    grid.n_coarse_far = n_coarse_far;
+    grid.n_fine_rem   = n_fine_rem;
+    grid.tier_start   = tier_start;
+end
+
+function v_k1 = compute_preview(F, C, Qy, r_, k, n_preview, grid)
+% Decimated Riccati recursion (costate only - under preview control the cost-to-go and gain are fixed via P=P_ss, K=K_ss)
+
+    v_k1 = (eye(12) - F) \ C'*Qy*r_(:, k+n_preview);  % SDOPT seed
+
+    df_ = grid.df_;
+    n_tiers = grid.n_tiers;
+
+    % Precompute the coarse preview matrices for each tier.
+    % > The fine preview update is:
+    %       v <- F*v + C'*Qy*r
+    %   With r held constant, d fine steps collapse into one coarse step:
+    %       v <- F_d*v + G_d*C'*Qy*r
+    %   where
+    %       F_d = F^d
+    %   and
+    %       G_d = I + F + ... + F^{d-1}.
+    % > G_d is a geometric series, which can be efficiently evaluated via
+    %       G_d = (I - F^d)(I - F)^{-1}
+    %   since F^d is already computed.
+    G_inf = (eye(12) - F) \ eye(12);
+    F_d = cell(1, n_tiers);
+    G_d = cell(1, n_tiers);
+    for i = 1:n_tiers
+        F_d{i} = F^df_(i);
+        G_d{i} = (eye(12) - F_d{i}) * G_inf;
+    end
+
+    % Recursion across the tiers (far-horizon and near-horizon)
+    for i = n_tiers:-1:1
+        d = df_(i);
+        for b = grid.n_blocks(i):-1:1
+            j_blk = grid.tier_start(i) + (b-1)*d;
+            r_bar = sum(r_(:, k+j_blk : k+j_blk+d-1), 2) / d;  % block-averaged reference
+            v_k1  = F_d{i}*v_k1 + G_d{i}*C'*Qy*r_bar;
+        end
+    end
+
+    % Recursion across the remainder fine steps
+    for j = grid.n_fine_rem:-1:1
+        v_k1 = F*v_k1 + C'*Qy*r_(:, k+j);
+    end
+end
+
+function [P, v_k1] = compute_riccati_recursion(A, B, C, Qy, R, P, v_k1, r_, k, grid, useHeldX)
+% Decimated Riccati recursion (cost-to-go and costate)
+
+    Q = C'*Qy*C;
+    
+    df_ = grid.df_;
+    n_tiers = grid.n_tiers;
+
+    % Precompute the coarse system matrices for each tier.
+    % > Since the decimation factors are sorted in ascending order, the powers A^p and B_p can be built up incrementally as the decimation factor increases (rather than recomputed from scratch each time).
+    A_d  = cell(1, n_tiers);
+    B_d  = cell(1, n_tiers);
+    Qy_d = cell(1, n_tiers);
+    Q_d  = cell(1, n_tiers);
+    R_d  = cell(1, n_tiers);
+    N_d  = cell(1, n_tiers);
+    G_d  = cell(1, n_tiers);
+    H_d  = cell(1, n_tiers);
+    A_p  = eye(12);
+    B_p  = zeros(12, 6);
+    p    = 0;
+    Q_sum = zeros(12); N_sum = zeros(12, 6); S_sum = zeros(6); G_sum = zeros(12); H_sum = zeros(12, 6);
+    for i = 1:n_tiers
+        if df_(i) == 1
+            A_d{i} = A; B_d{i} = B; Qy_d{i} = Qy; Q_d{i} = Q; R_d{i} = R;
+            N_d{i} = zeros(12, 6); G_d{i} = eye(12); H_d{i} = zeros(12, 6);
+        else
+            % Step up the powers to the current decimation factor
+            while p < df_(i)
+                if ~useHeldX
+                    Q_sum = Q_sum + A_p'*Q*A_p;
+                    N_sum = N_sum + A_p'*Q*B_p;
+                    S_sum = S_sum + B_p'*Q*B_p;
+                    G_sum = G_sum + A_p;
+                    H_sum = H_sum + B_p;
+                end
+                B_p = A * B_p + B;
+                A_p = A * A_p;
+                p   = p + 1;
+            end
+            A_d{i}  = A_p;
+            B_d{i}  = B_p;
+            if useHeldX
+                Qy_d{i} = df_(i) * Qy;
+                Q_d{i}  = df_(i) * Q;
+                R_d{i}  = df_(i) * R;
+            else
+                Q_d{i} = Q_sum;
+                N_d{i} = N_sum;
+                R_d{i} = df_(i) * R + S_sum;
+                G_d{i} = G_sum;
+                H_d{i} = H_sum;
+            end
+        end
+    end
+
+    % Recursion across the tiers (far-horizon and near-horizon)
+    for i = n_tiers:-1:1
+        d = df_(i);
+        for b = grid.n_blocks(i):-1:1
+            j_blk = grid.tier_start(i) + (b-1)*d;
+            r_bar = sum(r_(:, k+j_blk : k+j_blk+d-1), 2) / d;
+            if useHeldX
+                K_d   = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i});
+                A_cl  = A_d{i} - B_d{i}*K_d;
+                P     = Q_d{i} + K_d'*R_d{i}*K_d + A_cl'*P*A_cl;
+                v_k1  = A_cl'*v_k1 + C'*Qy_d{i}*r_bar;
+            else
+                K_d   = (R_d{i} + B_d{i}'*P*B_d{i}) \ (B_d{i}'*P*A_d{i} + N_d{i}');
+                A_cl  = A_d{i} - B_d{i}*K_d;
+                P     = Q_d{i} + K_d'*R_d{i}*K_d - N_d{i}*K_d - K_d'*N_d{i}' + A_cl'*P*A_cl;
+                v_k1  = A_cl'*v_k1 + (G_d{i} - H_d{i}*K_d)'*C'*Qy*r_bar;
+            end
+        end
+    end
+
+    % Recursion across the remainder fine steps
+    for j = grid.n_fine_rem:-1:1
+        K    = (R + B'*P*B) \ (B'*P*A);
+        A_cl = A - B*K;
+        P    = Q + K'*R*K + A_cl'*P*A_cl;
+        v_k1 = A_cl'*v_k1 + C'*Qy*r_(:, k+j);
+    end
+end
+
+function [P_ss, K_ss, info] = solve_dare(A, B, Q, R, k, solver, solverOpts)
+% Solve the DARE for the steady-state Riccati solution P_ss and gain K_ss.
+%
+% Persistent state: warm-starts iterative solvers across calls.
+% Cold-solves on k == 1 regardless of the requested solver.
+
+    persistent P_ss_ K_ss_
     persistent warnedPreviously % for loud fallback warnings
     if k == 1, warnedPreviously = false; end
 
-    clock_start = tic;
+    if k == 1, solver = 'cold'; end
 
-    if k == 1, opts.DARESolver = 'cold'; end  % cold solve on init
-
-    switch lower(opts.DARESolver)
+    switch lower(solver)
 
     case {'cold','sda'}
         sdaOpts = struct();
-        if isfield(opts.DARESolverOpts, 'Tolerance')
-            sdaOpts.Tolerance = opts.DARESolverOpts.Tolerance;
+        if isfield(solverOpts, 'Tolerance')
+            sdaOpts.Tolerance = solverOpts.Tolerance;
         end
         args = namedargs2cell(sdaOpts);
-        [P_ss, info] = dare_sda(A, B, C'*Qy*C, R, args{:});
-        K_ss = (R + B'*P_ss*B) \ (B'*P_ss*A);
+        [P_ss_, sinfo] = dare_sda(A, B, Q, R, args{:});
+        K_ss_ = (R + B'*P_ss_*B) \ (B'*P_ss_*A);
 
-        solve_info.DARESolverTolAchieved = info.TolAchieved;
-        solve_info.DARESolverNumIters    = info.SolverIterations;
-        solve_info.DARESolverSuccess     = info.SolveSuccess;
+        info.TolAchieved = sinfo.TolAchieved;
+        info.NumIters    = sinfo.SolverIterations;
+        info.Success     = sinfo.SolveSuccess;
 
     case 'idare'
 
-        [P_ss,K_ss,~,info]  = idare(A, B, C'*Qy*C, R);
-        parse_idare_info(info);
+        [P_ss_,K_ss_,~,sinfo] = idare(A, B, Q, R);
+        parse_idare_info(sinfo);
 
-        solve_info.DARESolverTolAchieved = compute_dare_residual(A,B,C'*Qy*C,R,P_ss,K_ss);
-        solve_info.DARESolverNumIters    = 0;
-        solve_info.DARESolverSuccess     = 1;
+        info.TolAchieved = compute_dare_residual(A, B, Q, R, P_ss_, K_ss_);
+        info.NumIters    = 0;
+        info.Success     = 1;
 
     case 'dlqr'
 
-        [K_ss,P_ss] = dlqr(A, B, C'*Qy*C, R);
-        solve_info.DARESolverTolAchieved = compute_dare_residual(A,B,C'*Qy*C,R,P_ss,K_ss);
-        solve_info.DARESolverNumIters    = 0;
-        solve_info.DARESolverSuccess     = 1;
+        [K_ss_,P_ss_] = dlqr(A, B, Q, R);
+        info.TolAchieved = compute_dare_residual(A, B, Q, R, P_ss_, K_ss_);
+        info.NumIters    = 0;
+        info.Success     = 1;
 
     case {'nk','riccati'} % the two iterative methods
 
-        solverOpts = opts.DARESolverOpts;
-        solverOpts.Method = opts.DARESolver;
-        args = namedargs2cell(solverOpts);
-        [P_ss, info] = iterative_dare(A, B, C'*Qy*C, R, P_ss, args{:});
-        K_ss  = (R + B'*P_ss*B) \ (B'*P_ss*A);
+        iterOpts = solverOpts;
+        iterOpts.Method = solver;
+        args = namedargs2cell(iterOpts);
+        [P_ss_, sinfo] = iterative_dare(A, B, Q, R, P_ss_, args{:});
+        K_ss_ = (R + B'*P_ss_*B) \ (B'*P_ss_*A);
 
-        % Fallback to SDA if initialised outside the stability basin (only needed for NK)
-        solve_info.DARESolverSuccess = info.SolveSuccess;
-        if strcmpi(opts.DARESolver,'nk') && ~info.SolveSuccess
-            if isfield(info,'UnstableK0') && info.UnstableK0
+        % Fallback to SDA if initialised outside the stability basin
+        % - only needed for NK
+        info.Success = sinfo.SolveSuccess;
+        if strcmpi(solver,'nk') && ~sinfo.SolveSuccess
+            if isfield(sinfo,'UnstableK0') && sinfo.UnstableK0
 
                 sdaOpts = struct();
-                if isfield(opts.DARESolverOpts, 'Tolerance'), sdaOpts.Tolerance = opts.DARESolverOpts.Tolerance; end
+                if isfield(solverOpts, 'Tolerance'), sdaOpts.Tolerance = solverOpts.Tolerance; end
                 args = namedargs2cell(sdaOpts);
-                [P_ss, info] = dare_sda(A, B, C'*Qy*C, R, args{:});
-                K_ss = (R + B'*P_ss*B) \ (B'*P_ss*A);
+                [P_ss_, sinfo] = dare_sda(A, B, Q, R, args{:});
+                K_ss_ = (R + B'*P_ss_*B) \ (B'*P_ss_*A);
                 
-                solve_info.DARESolverSuccess = 0.5*info.SolveSuccess; % 0.5 == sentinel value for partial success
+                info.Success = 0.5*sinfo.SolveSuccess; % 0.5 == sentinel value for partial success
                 
                 if warnedPreviously == false
-                    warning("compute_u_SDDRE_v3: NK iteration initialised outside of stability basin at k=%d. Fell back to SDA cold solve: success flag was %.1f", k, solve_info.DARESolverSuccess)
+                    warning("solve_dare: NK iteration initialised outside of stability basin at k=%d. Fell back to SDA cold solve: success flag was %.1f", k, info.Success)
                     warnedPreviously = true;
                 end
                 
             end
         end
 
-        solve_info.DARESolverTolAchieved = info.TolAchieved;
-        solve_info.DARESolverNumIters    = info.SolverIterations;
+        info.TolAchieved = sinfo.TolAchieved;
+        info.NumIters    = sinfo.SolverIterations;
 
     otherwise
 
-        error("Unknown DARESolver type.");
+        error("Unknown DARESolver type: '%s'", solver);
 
     end
-    solve_info.TimeToSolveDARE = toc(clock_start);
-    
 
-    % --- 3. Compute the feedforward (reference preview) term ---
-    
-    clock_start = tic;
-    A_cl  = A - B*K_ss;
-    if isinf(opts.PreviewHorizon)
-        % Constant reference approximation
-        s_k1  = (eye(12) - A_cl') \ (C'*Qy*r_(:,k));
-        u = -K_ss*xk + (R + B'*P_ss*B) \ (B'*s_k1);
-    else
-        M = round(opts.PreviewHorizon/qp.Ts);  % receding horizon preview window
-        approachingTerminal = (k+M >= length(r_));
-        
-        if ~(opts.AlwaysUseFullFiniteHorizonMPC || (opts.UseFullFiniteHorizonMPCAtTerminal && approachingTerminal))
-            % Main branch: infinite horizon w/ finite preview
-        
-            % v_k1 = C'*Qy*r_(:, min(k+M,length(r_))); % normal costate seed
-            v_k1 = (eye(12) - A_cl') \ (C'*Qy*r_(:, min(k+M,length(r_))));
-            for j = M-1:-1:1
-                v_k1 = A_cl'*v_k1 + C'*Qy*r_(:, min(k+j,length(r_)));
-            end
-            u = -K_ss*xk + (R + B'*P_ss*B) \ (B'*v_k1);
-        else
-            % Approaching terminal state.
-            % Compute full recursion for K_k, K_k^v, v_{k+1}.
-            % This ensures K is ramped up appropriately according to Qyf.
-            % (This is then exactly equivalent to LQT MPC using frozen A_SDC(xk), B_SDC(xk))
-            P = C'*Qyf*C;
-            M = min(M, length(r_) - k);
-            v = C'*Qyf*r_(:, k+M);
-            for j = M-1:-1:1
-                K_j    = (R + B'*P*B) \ (B'*P*A);
-                A_cl_j = A - B*K_j;
-                P      = C'*Qy*C + K_j'*R*K_j + A_cl_j'*P*A_cl_j;
-                v      = A_cl_j'*v + C'*Qy*r_(:, k+j);
-            end
-            Kk  = (R + B'*P*B) \ (B'*P*A);
-            Kvk = (R + B'*P*B) \ B';
-            u   = -Kk*xk + Kvk*v;
-        end
-    end
-    solve_info.TimeToComputeFeedforward = toc(clock_start);
+    P_ss = P_ss_;
+    K_ss = K_ss_;
+
 end
-
 
 function parse_idare_info(info)
     switch info.Report
-        case 1, warning("idare(), info.Report == 1 (The solution accuracy is poor)")
-        case 2, warning("idare(), info.Report == 2 (The solution is not finite)")
-        case 3, error("idare(), info.Report == 3 (No solution found since the Symplectic spectrum, denoted by [L;1./L], has eigenvalues on the unit circle)")
-        case 4, error("idare(), info.Report == 4 (Pencil is singular ([B;S;R] is rank deficient)")
+    case 1, warning("idare(), info.Report == 1 (The solution accuracy is poor)")
+    case 2, warning("idare(), info.Report == 2 (The solution is not finite)")
+    case 3, error("idare(), info.Report == 3 (No solution found since the Symplectic spectrum, denoted by [L;1./L], has eigenvalues on the unit circle)")
+    case 4, error("idare(), info.Report == 4 (Pencil is singular ([B;S;R] is rank deficient)")
     end
 end

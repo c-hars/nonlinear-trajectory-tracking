@@ -27,8 +27,8 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
     if opts.MaxItersNK == 0
         P_ss = P0;
         info.SolverIterations = 0;
-        info.TolAchieved = nan;
-        info.SolveSuccess = nan;
+        info.TolAchieved = 0;  % sentinel
+        info.SolveSuccess = -1; % sentinel
         return
     end
 
@@ -123,6 +123,7 @@ function [P_ss,info] = iterative_dare(A, B, Q, R, P0, opts)
     end
     info.TolAchieved = compute_dare_residual(A,B,Q,R,P);
     info.SolveSuccess = (info.TolAchieved < opts.Tolerance);
+
 
 
 end
